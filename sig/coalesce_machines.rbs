@@ -1,0 +1,48 @@
+module CoalesceMachines
+  VERSION: String
+
+  class Leader < Data
+    attr_reader flight_id: Integer
+    attr_reader key: Integer
+    def self.new: (Integer flight_id, Integer key) -> Leader
+                | (flight_id: Integer, key: Integer) -> Leader
+  end
+
+  class Follower < Data
+    attr_reader waiter_id: Integer
+    attr_reader flight_id: Integer
+    attr_reader key: Integer
+    def self.new: (Integer waiter_id, Integer flight_id, Integer key) -> Follower
+                | (waiter_id: Integer, flight_id: Integer, key: Integer) -> Follower
+  end
+
+  class Notification < Data
+    type outcome = :completed | :abandoned
+
+    attr_reader waiter_id: Integer
+    attr_reader flight_id: Integer
+    attr_reader key: Integer
+    attr_reader outcome: outcome
+    def self.new: (Integer waiter_id, Integer flight_id, Integer key, outcome outcome) -> Notification
+                | (waiter_id: Integer, flight_id: Integer, key: Integer, outcome: outcome) -> Notification
+  end
+
+  class Coalescer
+    FLIGHT_CAPACITY: Integer
+    WAITER_CAPACITY: Integer
+
+    def self.new: () -> Coalescer
+    def join: (Integer key) -> (Leader | Follower | :flights_full | :waiters_full | :exhausted)
+    def complete: (Integer flight_id) -> (Integer | :stale)
+    def abandon: (Integer flight_id) -> (Integer | :stale)
+    def cancel: (Integer waiter_id) -> (:cancelled | :stale)
+    def drain: (Integer max) -> Array[Notification]
+    def flight: (Integer key) -> Integer?
+    def followers: (Integer flight_id) -> Integer?
+    def in_flight: () -> Integer
+    def waiting: () -> Integer
+    def pending: () -> Integer
+    def flight_capacity: () -> Integer
+    def waiter_capacity: () -> Integer
+  end
+end

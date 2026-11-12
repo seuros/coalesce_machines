@@ -1,0 +1,14 @@
+[package]
+name = "coalesce-machines"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Bounded per-key in-flight leader/follower coalescing with generation-checked completion"
+readme = "README.md"
+exclude = ["src/**/tests.rs", "tests/"]
+keywords = ["singleflight", "coalescing", "stampede", "cache", "no-std"]
+categories = ["no-std", "algorithms", "caching"]
+
+[lints]
+workspace = true
