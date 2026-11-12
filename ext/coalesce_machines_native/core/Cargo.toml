@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 description = "Bounded per-key in-flight leader/follower coalescing with generation-checked completion"
 readme = "README.md"
-exclude = ["src/**/tests.rs", "tests/"]
+exclude = ["src/**/tests.rs", "src/tests/", "tests/"]
 keywords = ["singleflight", "coalescing", "stampede", "cache", "no-std"]
 categories = ["no-std", "algorithms", "caching"]
 
