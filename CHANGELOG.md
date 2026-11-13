@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/seuros/coalesce_machines/compare/coalesce_machines/v0.2.0...coalesce_machines/v0.3.0) (2026-11-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* see CONVENTIONS: one exhaustive Refusal per crate, Result from every mutator, honoured idempotent repeats, Ruby mirrors the core. No compatibility aliases. Ruby gains poll, scoped, scope_of and the sequence constants.
+
+### Features
+
+* exhaustive Refusal without alias, Ruby mirrors Joined and Notification fields, with_scope constructor ([de09f01](https://github.com/seuros/coalesce_machines/commit/de09f01be8793a23d6d178bb165fb929893f2ee5))
+
 ## [0.2.0](https://github.com/seuros/coalesce_machines/compare/coalesce_machines/v0.1.2...coalesce_machines/v0.2.0) (2026-11-13)
 
 
