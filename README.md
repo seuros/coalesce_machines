@@ -220,8 +220,10 @@ flights.pending         # => notifications queued and not yet drained
 ## The Rules of the Tender
 
 - **Keys and ids are Integers** in `0..2**64-1`. Floats, nil, and strings raise `TypeError`. Out of range raises `RangeError`. If your keys are strings, hash them yourself, and know that two keys with the same hash share a flight.
-- **Ids belong to one coalescer, and scopes keep it that way.** Ids are plain Integers counted from 1, so two coalescers issue the same ones, and an id handed to the wrong coalescer can name a live flight or waiter there. If you run more than one, give each its own scope: `Coalescer.with_scope(3)`, any Integer in `0..65_535`. `Coalescer.new` is scope zero. The scope rides in the top 16 bits of every id, and an id from another scope is always `:stale`. `CoalesceMachines.scope_of(id)` reads it back, `CoalesceMachines.scoped(scope, sequence)` builds an id in the same layout, and `CoalesceMachines::SEQUENCE_BITS` (48) and `SEQUENCE_MAX` (`2**48 - 1`) describe it; after `SEQUENCE_MAX` registrations `join` answers `:exhausted`. The coalescer can't pick a scope for you. A flight id is not a waiter id.
-- **Ids are never reused.** A settled flight, a cancelled waiter, and a drained notification are `:stale` from then on.
+- **Scopes: ids belong to the coalescer that issued them.** Ids are plain Integers, so two coalescers in the same scope issue the same ones, and an id handed to the wrong coalescer can name a live flight or waiter there. If you run more than one, give each its own scope: `Coalescer.with_scope(3)`, any Integer in `0..65_535`. `Coalescer.new` is scope zero and counts 1, 2, 3. The scope rides in the top 16 bits of every id, above a 48-bit sequence, and an id from another scope is always `:stale`. The coalescer can't pick a scope for you. `CoalesceMachines.scope_of(id)` reads the scope back, so you can route an id to the coalescer that issued it. It is the only layout helper the gem has: the layout belongs to the Rust crate `periscope-machines`, which has no gem. After `2**48 - 1` ids `join` answers `:exhausted`. A flight id is not a waiter id.
+- **One sequence, and `reserve`.** Flight ids and waiter ids come from the same counter, so no two ids of one coalescer are ever equal. `reserve` takes the next number of that sequence for a handle of your own, a lease or a ticket you keep in your own table next to the coalescer: it is never a flight or a waiter (`:stale` or `nil` from every method, forever), never issued again, and `:exhausted` once the sequence is spent. `owns?(id)` says whether this coalescer issued an id, live or not; `issued` and `remaining` count the sequence.
+- **Restarts: resume the sequence, or take a new scope.** A new coalescer counts from one again, so an id that outlived a restart could name a new flight. Either save `issued` and build the replacement with `Coalescer.resumed(scope, issued)`, which has nothing in flight and carries on after the saved count (`nil` if `issued` is more than `2**48 - 1`), or give each incarnation a scope it never had before.
+- **Ids are never reused.** A settled flight, a cancelled waiter, and a drained notification are `:stale` from then on. That includes repeats: a second `complete`, `abandon`, or `cancel` is `:stale`, because the coalescer keeps nothing about how a flight or waiter ended.
 - **Refusals don't raise and don't change anything.** `:flights_full`, `:waiters_full`, `:exhausted`, and `:stale` are answers. Only malformed input raises: a scope that isn't an Integer raises `TypeError`, one outside `0..65_535` raises `RangeError`.
 - **Every answer, by method.**
 
@@ -231,12 +233,13 @@ flights.pending         # => notifications queued and not yet drained
   | `complete(flight)` | followers queued for notification (Integer) | `:stale` |
   | `abandon(flight)` | followers queued for notification (Integer) | `:stale` |
   | `cancel(waiter)` | `:cancelled` | `:stale` |
+  | `reserve` | the next id of the sequence (Integer) | `:exhausted` |
   | `poll` | the oldest queued `Notification`, `nil` when nothing is queued | never refuses |
   | `drain(max)` | an Array of `Notification`, `[]` when nothing is queued | never refuses |
 
   Every refusal has its own symbol; there is no catch-all.
 - **Whoever holds the flight id can settle it.** Give it to the leader and nobody else.
-- **Frozen means frozen.** `freeze` the coalescer and `join`, `complete`, `abandon`, `cancel`, `poll`, and `drain` all raise `FrozenError`.
+- **Frozen means frozen.** `freeze` the coalescer and `join`, `complete`, `abandon`, `cancel`, `reserve`, `poll`, and `drain` all raise `FrozenError`.
 - **Not thread-safe.** Wrap it in your own mutex if several threads share one. Hold the mutex for the call, not for the computation.
 
 ## What You Think You're Doing vs Reality

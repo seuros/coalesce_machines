@@ -46,19 +46,39 @@ assert!(matches!(flights.join(42), Ok(Joined::Leader(_))));
   flight; at most `WAITERS` waiting followers plus undrained notifications,
   across all keys. A full table answers `Refusal::FlightsFull` or
   `Refusal::WaitersFull`; nothing is evicted. Drain to free waiter slots.
-- **Ids.** `FlightId` and `WaiterId` come from one `u64` counter and are never
-  reissued, so a settled, cancelled or drained id is `Refusal::Stale` forever,
-  and a slot reused by a later registration cannot be settled by an old id.
-  After `SEQUENCE_MAX` (2^48 - 1) registrations `join` answers
-  `Refusal::Exhausted`. `raw` / `from_raw` carry ids across FFI or queues. A `FlightId` is a capability:
-  whoever holds it can settle the flight, so hand it only to the leader.
-- **Scopes.** Ids are plain integers, so two coalescers in the same scope issue
-  the same ones and an id handed to the wrong coalescer can name a live
-  registration there. `Coalescer::with_scope(scope)` puts a caller-chosen `u16`
-  in the top 16 bits of every id; an id from another scope is always
-  `Refusal::Stale`. `new()` is scope zero. The coalescer cannot choose a scope
-  itself: keeping them distinct is the caller's job. `scoped` and `scope_of`
-  expose the layout to cores that issue ids alongside a coalescer.
+- **Ids.** `FlightId` and `WaiterId` come from one `periscope_machines::Issuer`
+  and are never reissued, so a settled, cancelled or drained id is
+  `Refusal::Stale` forever, and a slot reused by a later registration cannot be
+  settled by an old id. After `periscope_machines::SEQUENCE_MAX` (2^48 - 1)
+  registrations `join` answers `Refusal::Exhausted`. A join refused for any
+  reason consumes no id. `raw` / `from_raw` carry ids across FFI or queues. A
+  `FlightId` is a capability: whoever holds it can settle the flight, so hand
+  it only to the leader.
+- **Scopes.** Ids are only meaningful to the coalescer that issued them. Two
+  coalescers in the same scope issue the same ids, and an id handed to the
+  wrong one can name a live registration there, so give each coalescer its own
+  scope: `Coalescer::with_scope(scope)` puts a caller-chosen `u16` in the top
+  16 bits of every id, and an id from another scope is always `Refusal::Stale`,
+  refused before any table is read. `new()` is scope zero and issues 1, 2, 3.
+  The coalescer cannot choose a scope itself: keeping them distinct is the
+  caller's job. The layout belongs to `periscope-machines`; use its `scoped`,
+  `scope_of` and `sequence_of` to build or read raw ids. `FlightId::scope` and
+  `WaiterId::scope` read the scope of an id.
+- **One sequence.** Every id a coalescer hands out comes from that one
+  sequence, so no two of them are ever equal, whatever their kind, and an id
+  rebuilt as the wrong kind names nothing. `reserve()` is the seam for a core
+  built on top that issues handles of its own: it takes the next id of the
+  sequence, which is never a flight or a waiter (`Refusal::Stale` or `None`
+  from every method, forever) and is never issued again. `owns(raw)` proves an
+  id was issued here, live or not; `remaining()` says how many are left.
+- **Restarts.** A new coalescer counts from one again, so an id that outlived
+  a restart could name a new registration. Either save `issued()` and build
+  the replacement with `Coalescer::resumed(scope, issued)` (nothing in flight,
+  the sequence continuing; `None` when `issued` is beyond `SEQUENCE_MAX`), or
+  give each incarnation a new scope.
+- **Repeats are not honoured.** The coalescer keeps nothing about a flight
+  once it settles or a waiter once it leaves, so a second `complete`, `abandon`
+  or `cancel` is `Refusal::Stale` even though the id was provably issued here.
 - **Refusals change nothing.** Every `Err` leaves the coalescer bit-for-bit as
   it was.
 - **Cancellation.** `cancel(waiter)` withdraws a follower while it waits, and

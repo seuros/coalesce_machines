@@ -13,6 +13,7 @@ doctest = false
 
 [dependencies]
 coalesce-machines.workspace = true
+periscope-machines.workspace = true
 magnus.workspace = true
 rb-sys.workspace = true
 

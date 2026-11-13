@@ -3,25 +3,7 @@
 
 use core::fmt;
 
-/// Bits of an id that count registrations; the bits above carry the scope.
-pub const SEQUENCE_BITS: u32 = 48;
-
-/// The last sequence number a coalescer issues before it is [`Refusal::Exhausted`].
-pub const SEQUENCE_MAX: u64 = (1 << SEQUENCE_BITS) - 1;
-
-/// Build a raw id from the issuer's scope and a sequence number at or below [`SEQUENCE_MAX`].
-///
-/// Shared by cores that issue ids alongside a coalescer and want the same layout.
-#[must_use]
-pub const fn scoped(scope: u16, sequence: u64) -> u64 {
-    ((scope as u64) << SEQUENCE_BITS) | (sequence & SEQUENCE_MAX)
-}
-
-/// The scope a raw id was issued under.
-#[must_use]
-pub const fn scope_of(raw: u64) -> u16 {
-    (raw >> SEQUENCE_BITS) as u16
-}
+use periscope_machines::{Issuer, scope_of};
 
 /// Identity of one in-flight computation, and the token that settles it.
 ///
@@ -194,9 +176,8 @@ pub struct Coalescer<const FLIGHTS: usize, const WAITERS: usize> {
     waiters: [Option<Waiter>; WAITERS],
     ready: Chain,
     in_flight: usize,
-    /// Sequence number of the last id issued; the scope is added on the way out.
-    issued: u64,
-    scope: u16,
+    /// The one sequence of this coalescer: flight, waiter and reserved ids alike.
+    ids: Issuer,
 }
 
 impl<const FLIGHTS: usize, const WAITERS: usize> Default for Coalescer<FLIGHTS, WAITERS> {
@@ -214,28 +195,88 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
 
     /// Start with nothing in flight, issuing ids that carry `scope`.
     ///
-    /// Ids are plain integers, so two coalescers in the same scope issue the
-    /// same ones, and an id handed to the wrong coalescer can name a live
-    /// registration there. Give each coalescer whose ids could meet its own
-    /// scope: an id from another scope is then always [`Refusal::Stale`].
+    /// Ids come from a [`periscope_machines::Issuer`]: the scope in the top 16
+    /// bits, a 48-bit sequence counted from one below. Two coalescers in the
+    /// same scope issue the same ones, and an id handed to the wrong coalescer
+    /// can name a live registration there. Give each coalescer whose ids could
+    /// meet its own scope: an id from another scope is then always
+    /// [`Refusal::Stale`], refused before any table is read.
     /// The coalescer cannot pick a scope itself; keeping them distinct is the
     /// caller's job.
     #[must_use]
     pub const fn with_scope(scope: u16) -> Self {
-        Self {
-            flights: [None; FLIGHTS],
-            waiters: [None; WAITERS],
-            ready: Chain::EMPTY,
-            in_flight: 0,
-            issued: 0,
-            scope,
+        Self::issuing(Issuer::new(scope))
+    }
+
+    /// Start with nothing in flight, the id sequence continuing after `issued`.
+    ///
+    /// For a coalescer that replaces an earlier one in the same `scope`, after
+    /// a restart: built with [`Self::with_scope`] it would count from one again,
+    /// and an id that outlived the restart could name a new registration. Save
+    /// [`Self::issued`] before handing an id out and resume from it, or give
+    /// each incarnation a scope of its own. Every id up to `issued` is then
+    /// [`Refusal::Stale`]: issued, and no longer live.
+    ///
+    /// `None` exactly when [`periscope_machines::Issuer::resumed`] answers
+    /// `None`: `issued` is beyond [`periscope_machines::SEQUENCE_MAX`].
+    #[must_use]
+    pub const fn resumed(scope: u16, issued: u64) -> Option<Self> {
+        match Issuer::resumed(scope, issued) {
+            Some(ids) => Some(Self::issuing(ids)),
+            None => None,
         }
     }
 
     /// The scope carried by every id this coalescer issues.
     #[must_use]
     pub const fn scope(&self) -> u16 {
-        self.scope
+        self.ids.scope()
+    }
+
+    /// How many ids this coalescer has issued, of every kind: flights,
+    /// waiters and reserved ids. The count to save for [`Self::resumed`].
+    #[must_use]
+    pub const fn issued(&self) -> u64 {
+        self.ids.issued()
+    }
+
+    /// How many ids are left before [`Refusal::Exhausted`].
+    ///
+    /// For a core built on this one that needs more than one id for a single
+    /// step: check here first, so a step refused half way consumes none.
+    #[must_use]
+    pub const fn remaining(&self) -> u64 {
+        self.ids.remaining()
+    }
+
+    /// Whether `raw` is an id of this coalescer's sequence: a flight, a
+    /// waiter or a reserved id. It proves origin, not liveness, and an id
+    /// from another scope is never owned.
+    #[must_use]
+    pub const fn owns(&self, raw: u64) -> bool {
+        self.ids.owns(raw)
+    }
+
+    /// Take the next id of this coalescer's sequence for a handle of the
+    /// caller's own.
+    ///
+    /// This is the seam for a core built on top of a coalescer that issues
+    /// handles of its own (a lease, a ticket): drawn from here, they share
+    /// the one sequence, so no handle of the outer core ever equals a flight
+    /// or waiter id and a handle rebuilt as the wrong kind names nothing.
+    /// A reserved id is never a flight or a waiter: [`Self::complete`],
+    /// [`Self::abandon`] and [`Self::cancel`] answer [`Refusal::Stale`] for it
+    /// and [`Self::followers`] answers `None`, forever, and it is never issued
+    /// again. What it names is the caller's table to keep.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::Exhausted`] when no id is left. Nothing changes.
+    pub const fn reserve(&mut self) -> Result<u64, Refusal> {
+        match self.ids.issue() {
+            Ok(id) => Ok(id),
+            Err(refusal) => Err(spent(refusal)),
+        }
     }
 
     /// Register interest in `key`.
@@ -252,10 +293,11 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
     pub fn join(&mut self, key: u64) -> Result<Joined, Refusal> {
         if let Some(home) = self.slot_of_key(key) {
             let slot = free_slot(&self.waiters).ok_or(Refusal::WaitersFull)?;
-            let (sequence, id) = self.next_id()?;
             let Some(flight) = self.flights[home].as_mut() else {
                 return Err(Refusal::Stale);
             };
+            // The last thing that can refuse, so a refused join consumes no id.
+            let id = self.ids.issue().map_err(spent)?;
             self.waiters[slot] = Some(Waiter {
                 id,
                 key,
@@ -265,21 +307,19 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
                 next: None,
             });
             push_back(&mut self.waiters, &mut flight.followers, slot);
-            self.issued = sequence;
             return Ok(Joined::Follower {
                 waiter: WaiterId(id),
                 flight: FlightId(flight.id),
             });
         }
         let slot = free_slot(&self.flights).ok_or(Refusal::FlightsFull)?;
-        let (sequence, id) = self.next_id()?;
+        let id = self.ids.issue().map_err(spent)?;
         self.flights[slot] = Some(Flight {
             id,
             key,
             followers: Chain::EMPTY,
         });
         self.in_flight += 1;
-        self.issued = sequence;
         Ok(Joined::Leader(FlightId(id)))
     }
 
@@ -291,7 +331,8 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
     ///
     /// # Errors
     ///
-    /// [`Refusal::Stale`] when `flight` is not in flight. Nothing changes.
+    /// [`Refusal::Stale`] when `flight` is not in flight, or was issued in
+    /// another scope. Nothing changes.
     pub fn complete(&mut self, flight: FlightId) -> Result<usize, Refusal> {
         self.settle(flight, Outcome::Completed)
     }
@@ -304,7 +345,8 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
     ///
     /// # Errors
     ///
-    /// [`Refusal::Stale`] when `flight` is not in flight. Nothing changes.
+    /// [`Refusal::Stale`] when `flight` is not in flight, or was issued in
+    /// another scope. Nothing changes.
     pub fn abandon(&mut self, flight: FlightId) -> Result<usize, Refusal> {
         self.settle(flight, Outcome::Abandoned)
     }
@@ -319,8 +361,12 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
     ///
     /// # Errors
     ///
-    /// [`Refusal::Stale`] when `waiter` is not registered. Nothing changes.
+    /// [`Refusal::Stale`] when `waiter` is not registered, or was issued in
+    /// another scope. Nothing changes.
     pub fn cancel(&mut self, waiter: WaiterId) -> Result<(), Refusal> {
+        if !self.ids.owns(waiter.0) {
+            return Err(Refusal::Stale);
+        }
         let (slot, found) = self
             .waiters
             .iter()
@@ -414,6 +460,16 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
         WAITERS
     }
 
+    const fn issuing(ids: Issuer) -> Self {
+        Self {
+            flights: [None; FLIGHTS],
+            waiters: [None; WAITERS],
+            ready: Chain::EMPTY,
+            in_flight: 0,
+            ids,
+        }
+    }
+
     fn settle(&mut self, flight: FlightId, outcome: Outcome) -> Result<usize, Refusal> {
         let slot = self.slot_of_flight(flight).ok_or(Refusal::Stale)?;
         let settled = self.flights[slot].take().ok_or(Refusal::Stale)?;
@@ -430,25 +486,28 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
         Ok(settled.followers.len)
     }
 
-    /// The next sequence number and the scoped id that carries it; issues nothing yet.
-    const fn next_id(&self) -> Result<(u64, u64), Refusal> {
-        let sequence = self.issued + 1;
-        if sequence > SEQUENCE_MAX {
-            return Err(Refusal::Exhausted);
-        }
-        Ok((sequence, scoped(self.scope, sequence)))
-    }
-
     fn slot_of_key(&self, key: u64) -> Option<usize> {
         self.flights
             .iter()
             .position(|entry| entry.is_some_and(|flight| flight.key == key))
     }
 
+    /// The slot of a live flight. An id this coalescer never issued, one from
+    /// another scope included, is turned away before the table is read.
     fn slot_of_flight(&self, flight: FlightId) -> Option<usize> {
+        if !self.ids.owns(flight.0) {
+            return None;
+        }
         self.flights
             .iter()
             .position(|entry| entry.is_some_and(|live| live.id == flight.0))
+    }
+}
+
+/// The issuer's only refusal is this core's [`Refusal::Exhausted`].
+const fn spent(refusal: periscope_machines::Refusal) -> Refusal {
+    match refusal {
+        periscope_machines::Refusal::Exhausted => Refusal::Exhausted,
     }
 }
 

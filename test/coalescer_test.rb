@@ -134,21 +134,22 @@ class CoalescerTest < Minitest::Test
     assert_equal :stale, @flights.cancel(a.waiter)
   end
 
-  def test_id_layout_helpers
-    assert_equal [48, (2**48) - 1], [C::SEQUENCE_BITS, C::SEQUENCE_MAX]
-    assert_equal 5, C.scoped(0, 5)
-    assert_equal (3 << 48) | 5, C.scoped(3, 5)
-    assert_equal (65_535 << 48) | C::SEQUENCE_MAX, C.scoped(65_535, (2**64) - 1)
-    assert_equal [0, 3, 65_535], [5, C.scoped(3, 5), (2**64) - 1].map { |raw| C.scope_of(raw) }
-    scoped = C::Coalescer.with_scope(7)
-    assert_equal C.scoped(7, 1), scoped.join(1).flight
-    assert_equal 7, C.scope_of(scoped.join(1).waiter)
-    assert_raises(RangeError) { C.scoped(65_536, 1) }
-    assert_raises(RangeError) { C.scoped(1, 2**64) }
+  def test_scope_of_routes_an_id_to_its_coalescer
+    assert_equal [0, 0, 3, 65_535], [0, 5, (3 << 48) | 5, (2**64) - 1].map { C.scope_of(it) }
+    pool = [4, 9].to_h { [it, C::Coalescer.with_scope(it)] }
+    leader = pool[9].join(1)
+    follower = pool[9].join(1)
+    assert_equal [9, 9], [C.scope_of(leader.flight), C.scope_of(follower.waiter)]
+    assert_equal 1, pool.fetch(C.scope_of(leader.flight)).complete(leader.flight)
     assert_raises(RangeError) { C.scope_of(-1) }
-    assert_raises(TypeError) { C.scoped(1.0, 1) }
-    assert_raises(TypeError) { C.scoped(1, nil) }
+    assert_raises(RangeError) { C.scope_of(2**64) }
+    assert_raises(TypeError) { C.scope_of(1.0) }
     assert_raises(TypeError) { C.scope_of('1') }
+    assert_raises(TypeError) { C.scope_of(nil) }
+    # The rest of the layout lives in the periscope-machines crate, not here.
+    refute_respond_to C, :scoped
+    refute C.const_defined?(:SEQUENCE_BITS)
+    refute C.const_defined?(:SEQUENCE_MAX)
   end
 
   def test_strict_inputs_before_mutation
@@ -201,26 +202,54 @@ class CoalescerTest < Minitest::Test
     assert_equal [1, 1, 0], [@flights.in_flight, @flights.waiting, @flights.pending]
   end
 
-  def test_scopes_keep_the_ids_of_separate_coalescers_apart
+  def state(flights) = [flights.in_flight, flights.waiting, flights.pending]
+
+  # Regression: identical calls on two coalescers issue different ids, and
+  # each refuses the other's through every method that takes one.
+  def test_an_id_from_another_coalescer_names_nothing_here
     near = C::Coalescer.with_scope(1)
     far = C::Coalescer.with_scope(2)
     assert_equal [0, 1, 2], [@flights.scope, near.scope, far.scope]
-    near_leader = near.join(7)
-    far_leader = far.join(7)
-    near_follower = near.join(7)
-    far_follower = far.join(7)
-    assert_equal (1 << 48) | 1, near_leader.flight
-    assert_equal (2 << 48) | 2, far_follower.waiter
-    assert_equal 1, @flights.join(7).flight # scope zero keeps plain counters
+    near_ids = [near.join(7).flight, near.join(7).waiter]
+    far_ids = [far.join(7).flight, far.join(7).waiter]
+    assert_equal [(1 << 48) | 1, (1 << 48) | 2], near_ids
+    assert_equal [(2 << 48) | 1, (2 << 48) | 2], far_ids
+    assert_equal [1, 2], [@flights.join(7).flight, @flights.join(7).waiter] # scope zero keeps plain counters
 
-    # A foreign id names nothing here, and the refusal changes nothing.
-    assert_equal :stale, near.cancel(far_follower.waiter)
-    assert_equal :stale, near.complete(far_leader.flight)
-    assert_equal :stale, near.abandon(far_leader.flight)
-    assert_nil near.followers(far_leader.flight)
-    assert_equal [1, 1, 0], [near.in_flight, near.waiting, near.pending]
-    assert_equal :cancelled, near.cancel(near_follower.waiter)
-    assert_equal 1, far.complete(far_leader.flight)
+    [[near, far_ids], [far, near_ids]].each do |here, (flight, waiter)|
+      assert_equal :stale, here.complete(flight)
+      assert_equal :stale, here.abandon(flight)
+      assert_equal :stale, here.cancel(waiter)
+      assert_nil here.followers(flight)
+      assert_equal [1, 1, 0], state(here)
+      assert_equal 1, here.followers(here.flight(7))
+    end
+    assert_equal :cancelled, near.cancel(near_ids.last)
+    assert_equal 1, far.complete(far_ids.first)
+  end
+
+  def test_coalescers_left_in_the_same_scope_still_alias
+    one = C::Coalescer.with_scope(5)
+    other = C::Coalescer.with_scope(5)
+    flight = one.join(7).flight
+    assert_equal flight, other.join(8).flight
+    waiter = one.join(7).waiter
+    assert_equal waiter, other.join(8).waiter
+    # Nothing tells them apart: keeping scopes distinct is the caller's job.
+    assert_equal :cancelled, other.cancel(waiter)
+    assert_equal 0, other.complete(flight)
+    assert_equal [1, 1, 0], state(one)
+  end
+
+  def test_repeats_stay_stale
+    leader = @flights.join(7)
+    gone = @flights.join(7).waiter
+    assert_equal :cancelled, @flights.cancel(gone)
+    assert_equal :stale, @flights.cancel(gone)
+    assert_equal 0, @flights.complete(leader.flight)
+    assert_equal :stale, @flights.complete(leader.flight)
+    assert_equal :stale, @flights.abandon(leader.flight)
+    assert_equal [0, 0, 0], state(@flights)
   end
 
   def test_scope_must_be_a_sixteen_bit_integer
@@ -232,6 +261,81 @@ class CoalescerTest < Minitest::Test
     assert_raises(ArgumentError) { C::Coalescer.with_scope }
     assert_raises(ArgumentError) { C::Coalescer.new(1) }
     assert_raises(ArgumentError) { C::Coalescer.new(scope: 1) }
+  end
+
+  def refused_everywhere(flights, id)
+    before = [state(flights), flights.issued]
+    assert_equal %i[stale stale stale], [flights.complete(id), flights.abandon(id), flights.cancel(id)]
+    assert_nil flights.followers(id)
+    assert_equal before, [state(flights), flights.issued]
+  end
+
+  def test_reserved_ids_share_the_one_sequence_and_name_nothing
+    flights = C::Coalescer.with_scope(3)
+    ids = [flights.reserve, flights.join(7).flight, flights.reserve, flights.join(7).waiter, flights.reserve]
+    assert_equal((1..5).map { (3 << 48) | it }, ids)
+    assert_equal [5, 2**48 - 6], [flights.issued, flights.remaining]
+    assert_equal [1, 1, 0], state(flights)
+    ids.values_at(0, 2, 4).each { refused_everywhere(flights, it) }
+    assert(ids.all? { flights.owns?(it) })
+    refute([(3 << 48) | 6, 3 << 48, (4 << 48) | 1, 1].any? { flights.owns?(it) })
+    assert_equal 1, flights.complete(ids[1])
+    assert flights.owns?(ids[1]) # origin, not liveness
+  end
+
+  def test_no_id_repeats_across_join_and_reserve
+    seen = []
+    300.times do |i|
+      seen << @flights.reserve if i.even?
+      role = @flights.join(i % 5)
+      seen << (role.is_a?(C::Leader) ? role.flight : role.waiter)
+      @flights.complete(@flights.flight(i % 5)) if (i % 7).zero?
+      @flights.drain(8)
+    end
+    assert_equal seen.size, seen.uniq.size
+    assert_equal seen.size, @flights.issued
+    assert_equal (1..seen.size).to_a, seen
+  end
+
+  def test_resumed_continues_the_sequence_after_a_restart
+    first = C::Coalescer.with_scope(6)
+    old = [first.join(7).flight, first.join(7).waiter, first.reserve]
+    second = C::Coalescer.resumed(6, first.issued)
+    assert_equal [6, 3, [0, 0, 0]], [second.scope, second.issued, state(second)]
+    old.each { refused_everywhere(second, it) }
+    assert_equal [(6 << 48) | 4, (6 << 48) | 5], [second.join(7).flight, second.join(7).waiter]
+    old.each { refused_everywhere(second, it) }
+    # A fresh coalescer in the same scope would have reissued them.
+    assert_equal old.first, C::Coalescer.with_scope(6).join(7).flight
+    assert_equal [0, 0], [C::Coalescer.resumed(0, 0).issued, C::Coalescer.resumed(0, 0).scope]
+  end
+
+  def test_the_last_id_is_issued_then_exhausted
+    last = 2**48 - 1
+    flights = C::Coalescer.resumed(65_535, last - 1)
+    assert_equal 1, flights.remaining
+    assert_equal 2**64 - 1, flights.reserve
+    assert_equal [0, last], [flights.remaining, flights.issued]
+    assert_equal %i[exhausted exhausted], [flights.reserve, flights.join(1)]
+    assert_equal [[0, 0, 0], last], [state(flights), flights.issued]
+    spent = C::Coalescer.resumed(2, last)
+    assert_equal %i[exhausted exhausted], [spent.join(1), spent.reserve]
+  end
+
+  def test_resumed_validates_its_arguments
+    assert_raises(RangeError) { C::Coalescer.resumed(0, 2**48) }
+    assert_raises(RangeError) { C::Coalescer.resumed(7, 2**64 - 1) }
+    assert_raises(RangeError) { C::Coalescer.resumed(65_536, 0) }
+    assert_raises(RangeError) { C::Coalescer.resumed(0, -1) }
+    assert_raises(RangeError) { C::Coalescer.resumed(0, 2**64) }
+    assert_raises(TypeError) { C::Coalescer.resumed(1.0, 0) }
+    assert_raises(TypeError) { C::Coalescer.resumed(0, nil) }
+    assert_raises(ArgumentError) { C::Coalescer.resumed(0) }
+    assert_raises(TypeError) { @flights.owns?(nil) }
+    assert_raises(RangeError) { @flights.owns?(-1) }
+    @flights.freeze
+    assert_raises(FrozenError) { @flights.reserve }
+    assert_equal [0, 2**48 - 1, false], [@flights.issued, @flights.remaining, @flights.owns?(1)]
   end
 
   def test_coalescers_are_independent_and_survive_gc_stress

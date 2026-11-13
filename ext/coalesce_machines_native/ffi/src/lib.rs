@@ -4,9 +4,10 @@ mod init;
 use std::cell::RefCell;
 
 use coalesce_machines::{
-    Coalescer as Core, FlightId, Joined, Notification, Outcome, Refusal, WaiterId, scope_of, scoped,
+    Coalescer as Core, FlightId, Joined, Notification, Outcome, Refusal, WaiterId,
 };
 use magnus::{Error, Integer, RArray, Ruby, TryConvert, Value, prelude::*, typed_data::Obj};
+use periscope_machines::scope_of;
 
 const FLIGHT_CAPACITY: usize = 64;
 const WAITER_CAPACITY: usize = 256;
@@ -71,12 +72,7 @@ fn notification(ruby: &Ruby, class: Value, note: Notification) -> Result<Value, 
     )
 }
 
-/// `CoalesceMachines.scoped(scope, sequence)`: the raw id of that scope and sequence.
-const fn scoped_id(scope: Scope, sequence: Number) -> u64 {
-    scoped(scope.0, sequence.0)
-}
-
-/// `CoalesceMachines.scope_of(raw)`: the scope a raw id was issued under.
+/// `CoalesceMachines.scope_of(id)`: the scope an id was issued under.
 const fn scope_of_id(raw: Number) -> u16 {
     scope_of(raw.0)
 }
@@ -99,8 +95,43 @@ impl Coalescer {
         }
     }
 
+    /// Raises `RangeError` when `issued` is beyond the sequence (the core answers `None`).
+    fn resumed(ruby: &Ruby, scope: Scope, issued: Number) -> Result<Self, Error> {
+        Core::resumed(scope.0, issued.0)
+            .map(|core| Self {
+                core: RefCell::new(core),
+            })
+            .ok_or_else(|| {
+                Error::new(
+                    ruby.exception_range_error(),
+                    "issued is past the last sequence of a scope (2**48 - 1)",
+                )
+            })
+    }
+
     fn scope(&self) -> u16 {
         self.core.borrow().scope()
+    }
+
+    fn issued(&self) -> u64 {
+        self.core.borrow().issued()
+    }
+
+    fn remaining(&self) -> u64 {
+        self.core.borrow().remaining()
+    }
+
+    fn owns(&self, id: Number) -> bool {
+        self.core.borrow().owns(id.0)
+    }
+
+    fn reserve(ruby: &Ruby, this: Obj<Self>) -> Result<Value, Error> {
+        this.check_frozen()?;
+        let reserved = this.core.borrow_mut().reserve();
+        Ok(match reserved {
+            Ok(id) => ruby.integer_from_u64(id).as_value(),
+            Err(refused) => refusal(ruby, refused),
+        })
     }
 
     fn join(ruby: &Ruby, this: Obj<Self>, key: Number) -> Result<Value, Error> {

@@ -10,5 +10,8 @@ exclude = ["src/**/tests.rs", "src/tests/", "tests/"]
 keywords = ["singleflight", "coalescing", "stampede", "cache", "no-std"]
 categories = ["no-std", "algorithms", "caching"]
 
+[dependencies]
+periscope-machines.workspace = true
+
 [lints]
 workspace = true
