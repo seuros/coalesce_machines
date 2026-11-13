@@ -270,8 +270,8 @@ fn key_and_id_limits() {
     );
 
     // The last id is issued, then the space is spent for both roles.
-    let mut c = Coalescer::<2, 2>::new();
-    c.issued = u64::MAX - 2;
+    let mut c = Coalescer::<2, 2>::with_scope(u16::MAX);
+    c.issued = SEQUENCE_MAX - 2;
     let flight = leader(&mut c, 1);
     let waiter = follower(&mut c, 1);
     assert_eq!((flight.raw(), waiter.raw()), (u64::MAX - 1, u64::MAX));
@@ -299,3 +299,36 @@ fn refusals_describe_themselves() {
 }
 
 mod model;
+
+#[test]
+fn scopes_keep_the_ids_of_separate_coalescers_apart() {
+    let mut near = Coalescer::<2, 2>::with_scope(1);
+    let mut far = Coalescer::<2, 2>::with_scope(2);
+    let same = Coalescer::<2, 2>::new();
+    assert_eq!((near.scope(), far.scope(), same.scope()), (1, 2, 0));
+
+    // The same joins on both: without scopes these ids would be equal.
+    let (near_flight, far_flight) = (leader(&mut near, 7), leader(&mut far, 7));
+    let (near_waiter, far_waiter) = (follower(&mut near, 7), follower(&mut far, 7));
+    assert_eq!((near_flight.scope(), near_waiter.scope()), (1, 1));
+    assert_eq!((far_flight.scope(), far_waiter.scope()), (2, 2));
+    assert_eq!(near_flight.raw(), scoped(1, 1));
+    assert_eq!(far_waiter.raw(), scoped(2, 2));
+    assert_eq!(scope_of(far_waiter.raw()), 2);
+    assert_ne!(near_flight, far_flight);
+    assert_ne!(near_waiter, far_waiter);
+
+    // A foreign id names nothing here, and the refusal changes nothing.
+    let before = near.clone();
+    assert_eq!(near.cancel(far_waiter), Err(Refused::Stale));
+    assert_eq!(near.complete(far_flight), Err(Refused::Stale));
+    assert_eq!(near.abandon(far_flight), Err(Refused::Stale));
+    assert_eq!(near.followers(far_flight), None);
+    assert_eq!(near, before);
+    assert_eq!(near.cancel(near_waiter), Ok(()));
+    assert_eq!(far.complete(far_flight), Ok(1));
+
+    // Scope zero keeps the plain counter ids of `new`.
+    let mut plain = same;
+    assert_eq!(leader(&mut plain, 7).raw(), 1);
+}

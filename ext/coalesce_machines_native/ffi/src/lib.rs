@@ -6,7 +6,12 @@ use std::cell::RefCell;
 use coalesce_machines::{
     Coalescer as Core, FlightId, Joined, Notification, Outcome, Refused, WaiterId,
 };
-use magnus::{Error, Integer, RArray, Ruby, TryConvert, Value, prelude::*, typed_data::Obj};
+use magnus::{
+    Error, Integer, RArray, Ruby, TryConvert, Value,
+    prelude::*,
+    scan_args::{get_kwargs, scan_args},
+    typed_data::Obj,
+};
 
 const FLIGHT_CAPACITY: usize = 64;
 const WAITER_CAPACITY: usize = 256;
@@ -24,6 +29,23 @@ impl TryConvert for Number {
         }
         u64::try_convert(value).map(Self)
     }
+}
+
+/// The optional `scope:` keyword of a constructor; zero when omitted.
+fn scope_keyword(ruby: &Ruby, args: &[Value]) -> Result<u16, Error> {
+    let args = scan_args::<(), (), (), (), _, ()>(args)?;
+    let keywords = get_kwargs::<_, (), (Option<Value>,), ()>(args.keywords, &[], &["scope"])?;
+    let Some(value) = keywords.optional.0 else {
+        return Ok(0);
+    };
+    if Integer::from_value(value).is_none() {
+        return Err(Error::new(
+            ruby.exception_type_error(),
+            "scope must be an Integer",
+        ));
+    }
+    u16::try_convert(value)
+        .map_err(|_| Error::new(ruby.exception_range_error(), "scope must be in 0..=65535"))
 }
 
 fn refusal(ruby: &Ruby, refused: Refused) -> Value {
@@ -46,10 +68,14 @@ struct Coalescer {
 }
 
 impl Coalescer {
-    const fn new() -> Self {
-        Self {
-            core: RefCell::new(Core::new()),
-        }
+    fn new(ruby: &Ruby, args: &[Value]) -> Result<Self, Error> {
+        Ok(Self {
+            core: RefCell::new(Core::with_scope(scope_keyword(ruby, args)?)),
+        })
+    }
+
+    fn scope(&self) -> u16 {
+        self.core.borrow().scope()
     }
 
     fn join(ruby: &Ruby, this: Obj<Self>, key: Number) -> Result<Value, Error> {

@@ -31,7 +31,8 @@ module CoalesceMachines
     FLIGHT_CAPACITY: Integer
     WAITER_CAPACITY: Integer
 
-    def self.new: () -> Coalescer
+    def self.new: (?scope: Integer) -> Coalescer
+    def scope: () -> Integer
     def join: (Integer key) -> (Leader | Follower | :flights_full | :waiters_full | :exhausted)
     def complete: (Integer flight_id) -> (Integer | :stale)
     def abandon: (Integer flight_id) -> (Integer | :stale)

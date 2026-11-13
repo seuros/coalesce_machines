@@ -9,7 +9,8 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.undef_default_alloc_func();
     class.const_set("FLIGHT_CAPACITY", FLIGHT_CAPACITY)?;
     class.const_set("WAITER_CAPACITY", WAITER_CAPACITY)?;
-    class.define_singleton_method("new", function!(Coalescer::new, 0))?;
+    class.define_singleton_method("new", function!(Coalescer::new, -1))?;
+    class.define_method("scope", method!(Coalescer::scope, 0))?;
     class.define_method("join", method!(Coalescer::join, 1))?;
     class.define_method("complete", method!(Coalescer::complete, 1))?;
     class.define_method("abandon", method!(Coalescer::abandon, 1))?;

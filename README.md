@@ -215,9 +215,9 @@ flights.pending         # => notifications queued and not yet drained
 ## The Rules of the Tender
 
 - **Keys and ids are Integers** in `0..2**64-1`. Floats, nil, and strings raise `TypeError`. Out of range raises `RangeError`. If your keys are strings, hash them yourself, and know that two keys with the same hash share a flight.
-- **Ids belong to one coalescer.** They're plain Integers counted from 1, so an id from one `Coalescer` means something else, or nothing, in another. A flight id is not a waiter id.
+- **Ids belong to one coalescer, and scopes keep it that way.** Ids are plain Integers counted from 1, so two coalescers issue the same ones, and an id handed to the wrong coalescer can name a live flight or waiter there. If you run more than one, give each its own scope: `Coalescer.new(scope: 3)`, any Integer in `0..65_535`. The scope rides in the top 16 bits of every id, and an id from another scope is always `:stale`. The coalescer can't pick a scope for you. A flight id is not a waiter id.
 - **Ids are never reused.** A settled flight, a cancelled waiter, and a drained notification are `:stale` from then on.
-- **Refusals don't raise and don't change anything.** `:flights_full`, `:waiters_full`, `:exhausted`, and `:stale` are answers. Only malformed input raises.
+- **Refusals don't raise and don't change anything.** `:flights_full`, `:waiters_full`, `:exhausted`, and `:stale` are answers. Only malformed input raises: a `scope:` that isn't an Integer raises `TypeError`, one outside `0..65_535` raises `RangeError`.
 - **Whoever holds the flight id can settle it.** Give it to the leader and nobody else.
 - **Frozen means frozen.** `freeze` the coalescer and `join`, `complete`, `abandon`, `cancel`, and `drain` all raise `FrozenError`.
 - **Not thread-safe.** Wrap it in your own mutex if several threads share one. Hold the mutex for the call, not for the computation.

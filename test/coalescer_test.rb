@@ -169,6 +169,38 @@ class CoalescerTest < Minitest::Test
     assert_equal [1, 1, 0], [@flights.in_flight, @flights.waiting, @flights.pending]
   end
 
+  def test_scopes_keep_the_ids_of_separate_coalescers_apart
+    near = C::Coalescer.new(scope: 1)
+    far = C::Coalescer.new(scope: 2)
+    assert_equal [0, 1, 2], [@flights.scope, near.scope, far.scope]
+    near_leader = near.join(7)
+    far_leader = far.join(7)
+    near_follower = near.join(7)
+    far_follower = far.join(7)
+    assert_equal (1 << 48) | 1, near_leader.flight_id
+    assert_equal (2 << 48) | 2, far_follower.waiter_id
+    assert_equal 1, @flights.join(7).flight_id # scope zero keeps plain counters
+
+    # A foreign id names nothing here, and the refusal changes nothing.
+    assert_equal :stale, near.cancel(far_follower.waiter_id)
+    assert_equal :stale, near.complete(far_leader.flight_id)
+    assert_equal :stale, near.abandon(far_leader.flight_id)
+    assert_nil near.followers(far_leader.flight_id)
+    assert_equal [1, 1, 0], [near.in_flight, near.waiting, near.pending]
+    assert_equal :cancelled, near.cancel(near_follower.waiter_id)
+    assert_equal 1, far.complete(far_leader.flight_id)
+  end
+
+  def test_scope_must_be_a_sixteen_bit_integer
+    assert_equal 65_535, C::Coalescer.new(scope: 65_535).scope
+    assert_raises(RangeError) { C::Coalescer.new(scope: 65_536) }
+    assert_raises(RangeError) { C::Coalescer.new(scope: -1) }
+    assert_raises(TypeError) { C::Coalescer.new(scope: 1.0) }
+    assert_raises(TypeError) { C::Coalescer.new(scope: nil) }
+    assert_raises(ArgumentError) { C::Coalescer.new(1) }
+    assert_raises(ArgumentError) { C::Coalescer.new(scopes: 1) }
+  end
+
   def test_coalescers_are_independent_and_survive_gc_stress
     previous = GC.stress
     GC.stress = true

@@ -49,9 +49,16 @@ assert!(matches!(flights.join(42), Ok(Joined::Leader(_))));
 - **Ids.** `FlightId` and `WaiterId` come from one `u64` counter and are never
   reissued, so a settled, cancelled or drained id is `Refused::Stale` forever,
   and a slot reused by a later registration cannot be settled by an old id.
-  After `u64::MAX` registrations `join` answers `Refused::Exhausted`. `raw` /
-  `from_raw` carry ids across FFI or queues. A `FlightId` is a capability:
+  After `SEQUENCE_MAX` (2^48 - 1) registrations `join` answers
+  `Refused::Exhausted`. `raw` / `from_raw` carry ids across FFI or queues. A `FlightId` is a capability:
   whoever holds it can settle the flight, so hand it only to the leader.
+- **Scopes.** Ids are plain integers, so two coalescers in the same scope issue
+  the same ones and an id handed to the wrong coalescer can name a live
+  registration there. `Coalescer::with_scope(scope)` puts a caller-chosen `u16`
+  in the top 16 bits of every id; an id from another scope is always
+  `Refused::Stale`. `new()` is scope zero. The coalescer cannot choose a scope
+  itself: keeping them distinct is the caller's job. `scoped` and `scope_of`
+  expose the layout to cores that issue ids alongside a coalescer.
 - **Refusals change nothing.** Every `Err` leaves the coalescer bit-for-bit as
   it was.
 - **Cancellation.** `cancel(waiter)` withdraws a follower while it waits, and
