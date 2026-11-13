@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/seuros/coalesce_machines/compare/coalesce_machines/v0.1.1...coalesce_machines/v0.1.2) (2026-11-13)
+
+
+### Features
+
+* scope ids so separate coalescers never share one ([032cc0c](https://github.com/seuros/coalesce_machines/commit/032cc0c7edf983534e67f3ecbbf35a9e15034886))
+
 ## [0.1.1](https://github.com/seuros/coalesce_machines/compare/coalesce_machines-v0.1.0...coalesce_machines/v0.1.1) (2026-11-12)
 
 
