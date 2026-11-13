@@ -279,13 +279,6 @@ fn defaults_are_placeholders_the_coalescer_never_emits() {
 }
 
 #[test]
-#[allow(deprecated)]
-fn the_old_refusal_name_still_resolves() {
-    let old: Refused = Refusal::Stale;
-    assert_eq!(old, Refusal::Stale);
-}
-
-#[test]
 fn key_and_id_limits() {
     let mut c = Coalescer::<2, 2>::new();
     let low = leader(&mut c, 0);

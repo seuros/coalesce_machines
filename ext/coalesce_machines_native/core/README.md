@@ -75,8 +75,6 @@ assert!(matches!(flights.join(42), Ok(Joined::Leader(_))));
   default is never emitted: its ids are raw zero, which is never issued and is
   `Refusal::Stale` everywhere, and its outcome (`Abandoned`) describes no
   flight. Read only the `n` entries a `drain` reported.
-- **Naming.** The refusal enum is `Refusal`. `Refused` remains as a deprecated
-  alias for one release.
 - **Abandon.** `abandon(flight)` settles without a result. Followers are
   notified with `Outcome::Abandoned` and join again; the first becomes leader.
 

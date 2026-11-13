@@ -91,7 +91,6 @@ pub enum Joined {
 
 /// Why a call changed nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum Refusal {
     /// Every flight slot holds an unsettled flight; no new key can lead.
     FlightsFull,
@@ -116,10 +115,6 @@ impl fmt::Display for Refusal {
 }
 
 impl core::error::Error for Refusal {}
-
-/// The former name of [`Refusal`].
-#[deprecated(note = "renamed to `Refusal`")]
-pub type Refused = Refusal;
 
 /// How a flight ended. The result itself is the caller's to keep.
 ///

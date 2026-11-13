@@ -14,25 +14,25 @@ gem 'coalesce_machines'
 
 ```ruby
 flights = CoalesceMachines::Coalescer.new
-results = {}   # flight_id => value, yours to keep
-parked  = {}   # waiter_id => whatever is waiting, yours to wake
+results = {}   # flight id => value, yours to keep
+parked  = {}   # waiter id => whatever is waiting, yours to wake
 
 case (role = flights.join(key))
 when CoalesceMachines::Leader
-  results[role.flight_id] = render_dashboard(key)
-  flights.complete(role.flight_id)
+  results[role.flight] = render_dashboard(key)
+  flights.complete(role.flight)
 when CoalesceMachines::Follower
-  parked[role.waiter_id] = queue
+  parked[role.waiter] = queue
 else
   raise "coalescer refused #{key}: #{role}"   # :flights_full, :waiters_full
 end
 
 flights.drain(32).each do |note|
-  parked.delete(note.waiter_id).push(results[note.flight_id])
+  parked.delete(note.waiter).push(results[note.flight])
 end
 ```
 
-One coalescer, five verbs: `join`, `complete`, `abandon`, `cancel`, `drain`. Keys and ids are Integers.
+One coalescer, five verbs: `join`, `complete`, `abandon`, `cancel`, `drain` (and `poll`, a drain of one). Keys and ids are Integers.
 
 ## A Message to the Resistance
 
@@ -68,9 +68,9 @@ stateDiagram-v2
     [*] --> idle
     idle --> in_flight: join, returns a Leader
     in_flight --> in_flight: join, returns a Follower
-    in_flight --> in_flight: cancel(waiter_id)
-    in_flight --> idle: complete(flight_id), followers notified :completed
-    in_flight --> idle: abandon(flight_id), followers notified :abandoned
+    in_flight --> in_flight: cancel(waiter)
+    in_flight --> idle: complete(flight), followers notified :completed
+    in_flight --> idle: abandon(flight), followers notified :abandoned
 ```
 
 And the afternoon three requests wanted dashboard 42 at once:
@@ -108,8 +108,7 @@ flights = CoalesceMachines::Coalescer.new
 
 leader = flights.join(42)
 leader.class       # => CoalesceMachines::Leader
-leader.flight_id   # => 1
-leader.key         # => 42
+leader.flight   # => 1, the flight id you settle
 ```
 
 A `Leader` means nobody was computing this key and now you are. Join again while it's still in flight and you get a `Follower`:
@@ -117,17 +116,17 @@ A `Leader` means nobody was computing this key and now you are. Join again while
 ```ruby
 follower = flights.join(42)
 follower.class       # => CoalesceMachines::Follower
-follower.waiter_id   # => 2
-follower.flight_id   # => 1, the same flight
+follower.waiter   # => 2
+follower.flight   # => 1, the same flight
 ```
 
-`waiter_id` is the notification id. Park whatever is waiting under it.
+`waiter` is the notification id. Park whatever is waiting under it. `Leader` and `Follower` carry ids only; you already hold the key you joined with.
 
 ### Complete
 
 ```ruby
-flights.complete(leader.flight_id)   # => 1, one follower to notify
-flights.complete(leader.flight_id)   # => :stale, already settled
+flights.complete(leader.flight)   # => 1, one follower to notify
+flights.complete(leader.flight)   # => :stale, already settled
 flights.join(42).class               # => CoalesceMachines::Leader
 ```
 
@@ -138,11 +137,17 @@ flights.join(42).class               # => CoalesceMachines::Leader
 ```ruby
 notes = flights.drain(32)
 notes.first
-# => #<data CoalesceMachines::Notification waiter_id=2, flight_id=1, key=42, outcome=:completed>
+# => #<data CoalesceMachines::Notification waiter=2, flight=1, key=42, outcome=:completed>
 flights.drain(32)   # => []
 ```
 
 `drain(max)` hands back at most `max` notifications, oldest first, and keeps the rest for the next call. Flights are drained in the order they settled, and followers of one flight in the order they joined. Each notification is delivered once.
+
+`poll` takes just the oldest one, or `nil` when nothing is queued:
+
+```ruby
+flights.poll   # => a Notification, or nil
+```
 
 ### Abandon
 
@@ -153,7 +158,7 @@ flights = CoalesceMachines::Coalescer.new
 leader = flights.join(7)
 follower = flights.join(7)
 
-flights.abandon(leader.flight_id)   # => 1
+flights.abandon(leader.flight)   # => 1
 flights.drain(8).first.outcome      # => :abandoned
 flights.join(7).class               # => CoalesceMachines::Leader
 ```
@@ -169,15 +174,15 @@ flights = CoalesceMachines::Coalescer.new
 leader = flights.join(7)
 follower = flights.join(7)
 
-flights.cancel(follower.waiter_id)     # => :cancelled
-flights.cancel(follower.waiter_id)     # => :stale
-flights.followers(leader.flight_id)    # => 0
-flights.complete(leader.flight_id)     # => 0, nobody to notify
+flights.cancel(follower.waiter)     # => :cancelled
+flights.cancel(follower.waiter)     # => :stale
+flights.followers(leader.flight)    # => 0
+flights.complete(leader.flight)     # => 0, nobody to notify
 ```
 
-Cancel also works after the flight settled, as long as the notification hasn't been drained yet. Either way, once you get `:cancelled`, that `waiter_id` will never come out of `drain`.
+Cancel also works after the flight settled, as long as the notification hasn't been drained yet. Either way, once you get `:cancelled`, that waiter id will never come out of `drain`.
 
-The flight keeps going when its last follower leaves. If you want to stop a computation nobody is waiting for, `followers(flight_id)` tells you when that's true.
+The flight keeps going when its last follower leaves. If you want to stop a computation nobody is waiting for, `followers(flight)` tells you when that's true.
 
 ### Capacity
 
@@ -194,7 +199,7 @@ flights.join(64)                               # => :flights_full
 256.times { flights.join(0) }
 flights.join(0)                                # => :waiters_full
 
-flights.complete(leaders.first.flight_id)      # => 256
+flights.complete(leaders.first.flight)      # => 256
 flights.join(1)                                # => :waiters_full, nothing drained yet
 flights.drain(1)
 flights.join(1).class                          # => CoalesceMachines::Follower
@@ -205,7 +210,7 @@ Nothing is evicted to make room. On `:flights_full` or `:waiters_full`, compute 
 ### Looking around
 
 ```ruby
-flights.flight(42)      # => flight_id, or nil when 42 isn't in flight
+flights.flight(42)      # => flight id, or nil when 42 isn't in flight
 flights.followers(id)   # => followers still waiting, or nil when id isn't in flight
 flights.in_flight       # => flights not yet settled
 flights.waiting         # => followers waiting, across all keys
@@ -215,11 +220,23 @@ flights.pending         # => notifications queued and not yet drained
 ## The Rules of the Tender
 
 - **Keys and ids are Integers** in `0..2**64-1`. Floats, nil, and strings raise `TypeError`. Out of range raises `RangeError`. If your keys are strings, hash them yourself, and know that two keys with the same hash share a flight.
-- **Ids belong to one coalescer, and scopes keep it that way.** Ids are plain Integers counted from 1, so two coalescers issue the same ones, and an id handed to the wrong coalescer can name a live flight or waiter there. If you run more than one, give each its own scope: `Coalescer.new(scope: 3)`, any Integer in `0..65_535`. The scope rides in the top 16 bits of every id, and an id from another scope is always `:stale`. The coalescer can't pick a scope for you. A flight id is not a waiter id.
+- **Ids belong to one coalescer, and scopes keep it that way.** Ids are plain Integers counted from 1, so two coalescers issue the same ones, and an id handed to the wrong coalescer can name a live flight or waiter there. If you run more than one, give each its own scope: `Coalescer.with_scope(3)`, any Integer in `0..65_535`. `Coalescer.new` is scope zero. The scope rides in the top 16 bits of every id, and an id from another scope is always `:stale`. `CoalesceMachines.scope_of(id)` reads it back, `CoalesceMachines.scoped(scope, sequence)` builds an id in the same layout, and `CoalesceMachines::SEQUENCE_BITS` (48) and `SEQUENCE_MAX` (`2**48 - 1`) describe it; after `SEQUENCE_MAX` registrations `join` answers `:exhausted`. The coalescer can't pick a scope for you. A flight id is not a waiter id.
 - **Ids are never reused.** A settled flight, a cancelled waiter, and a drained notification are `:stale` from then on.
-- **Refusals don't raise and don't change anything.** `:flights_full`, `:waiters_full`, `:exhausted`, and `:stale` are answers. Only malformed input raises: a `scope:` that isn't an Integer raises `TypeError`, one outside `0..65_535` raises `RangeError`.
+- **Refusals don't raise and don't change anything.** `:flights_full`, `:waiters_full`, `:exhausted`, and `:stale` are answers. Only malformed input raises: a scope that isn't an Integer raises `TypeError`, one outside `0..65_535` raises `RangeError`.
+- **Every answer, by method.**
+
+  | Method | Honoured | Refused |
+  | --- | --- | --- |
+  | `join(key)` | a `Leader` or a `Follower` | `:flights_full`, `:waiters_full`, `:exhausted` |
+  | `complete(flight)` | followers queued for notification (Integer) | `:stale` |
+  | `abandon(flight)` | followers queued for notification (Integer) | `:stale` |
+  | `cancel(waiter)` | `:cancelled` | `:stale` |
+  | `poll` | the oldest queued `Notification`, `nil` when nothing is queued | never refuses |
+  | `drain(max)` | an Array of `Notification`, `[]` when nothing is queued | never refuses |
+
+  Every refusal has its own symbol; there is no catch-all.
 - **Whoever holds the flight id can settle it.** Give it to the leader and nobody else.
-- **Frozen means frozen.** `freeze` the coalescer and `join`, `complete`, `abandon`, `cancel`, and `drain` all raise `FrozenError`.
+- **Frozen means frozen.** `freeze` the coalescer and `join`, `complete`, `abandon`, `cancel`, `poll`, and `drain` all raise `FrozenError`.
 - **Not thread-safe.** Wrap it in your own mutex if several threads share one. Hold the mutex for the call, not for the computation.
 
 ## What You Think You're Doing vs Reality
@@ -241,7 +258,7 @@ There's no clock in here. A leader that crashes without calling `complete` or `a
 
 ## What's Yours
 
-The computation, and the thread or fiber it runs on. The result, and how long you keep it: store it under `flight_id` and drop it once the followers are woken. The parking: a queue, a promise, a condition variable, keyed by `waiter_id`. The wake-up: call `drain` after you settle, and keep calling until it comes back empty. Timeouts for leaders that never land. Locking, if more than one thread touches the coalescer. And the keys: what counts as "the same request" is decided by the Integer you pass in.
+The computation, and the thread or fiber it runs on. The result, and how long you keep it: store it under the flight id and drop it once the followers are woken. The parking: a queue, a promise, a condition variable, keyed by the waiter id. The wake-up: call `drain` after you settle, and keep calling until it comes back empty. Timeouts for leaders that never land. Locking, if more than one thread touches the coalescer. And the keys: what counts as "the same request" is decided by the Integer you pass in.
 
 The coalescer lives in your process and coordinates nothing across processes. Two app servers will each fly their own.
 

@@ -3,12 +3,13 @@
 require_relative 'coalesce_machines/version'
 
 module CoalesceMachines
-  # The caller that must run the computation and settle `flight_id`.
-  Leader = Data.define(:flight_id, :key)
-  # A caller sharing `flight_id`; wake it when `waiter_id` is drained.
-  Follower = Data.define(:waiter_id, :flight_id, :key)
-  # One follower to wake. `outcome` is :completed or :abandoned.
-  Notification = Data.define(:waiter_id, :flight_id, :key, :outcome)
+  # The caller that must run the computation and settle `flight`, a flight id.
+  Leader = Data.define(:flight)
+  # A caller sharing `flight`; wake it when its `waiter` id is drained.
+  Follower = Data.define(:waiter, :flight)
+  # One follower to wake: its waiter id, the flight that settled, the key the
+  # flight was for. `outcome` is :completed or :abandoned.
+  Notification = Data.define(:waiter, :flight, :key, :outcome)
 end
 
 # Native is required: no algorithm fallback. It builds the Data values above,

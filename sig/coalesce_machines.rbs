@@ -1,45 +1,69 @@
 module CoalesceMachines
   VERSION: String
 
+  # Bits of an id that count registrations; the bits above carry the scope.
+  SEQUENCE_BITS: Integer
+  # The last sequence number a coalescer issues before it answers :exhausted.
+  SEQUENCE_MAX: Integer
+
+  # Refusals: the call was not honoured and changed nothing. Every reason has
+  # its own symbol; there is no catch-all.
+  type refusal = :flights_full | :waiters_full | :exhausted | :stale
+
+  # The raw id of `scope` (0..65_535) and `sequence`; bits of `sequence` above
+  # SEQUENCE_MAX are dropped, as in the core.
+  def self.scoped: (Integer scope, Integer sequence) -> Integer
+  # The scope a raw id was issued under.
+  def self.scope_of: (Integer raw) -> Integer
+
+  # Ids are Integers: flight ids and waiter ids, as issued by `join`.
   class Leader < Data
-    attr_reader flight_id: Integer
-    attr_reader key: Integer
-    def self.new: (Integer flight_id, Integer key) -> Leader
-                | (flight_id: Integer, key: Integer) -> Leader
+    attr_reader flight: Integer
+    def self.new: (Integer flight) -> Leader
+                | (flight: Integer) -> Leader
   end
 
   class Follower < Data
-    attr_reader waiter_id: Integer
-    attr_reader flight_id: Integer
-    attr_reader key: Integer
-    def self.new: (Integer waiter_id, Integer flight_id, Integer key) -> Follower
-                | (waiter_id: Integer, flight_id: Integer, key: Integer) -> Follower
+    attr_reader waiter: Integer
+    attr_reader flight: Integer
+    def self.new: (Integer waiter, Integer flight) -> Follower
+                | (waiter: Integer, flight: Integer) -> Follower
   end
 
   class Notification < Data
     type outcome = :completed | :abandoned
 
-    attr_reader waiter_id: Integer
-    attr_reader flight_id: Integer
+    attr_reader waiter: Integer
+    attr_reader flight: Integer
     attr_reader key: Integer
     attr_reader outcome: outcome
-    def self.new: (Integer waiter_id, Integer flight_id, Integer key, outcome outcome) -> Notification
-                | (waiter_id: Integer, flight_id: Integer, key: Integer, outcome: outcome) -> Notification
+    def self.new: (Integer waiter, Integer flight, Integer key, outcome outcome) -> Notification
+                | (waiter: Integer, flight: Integer, key: Integer, outcome: outcome) -> Notification
   end
 
   class Coalescer
     FLIGHT_CAPACITY: Integer
     WAITER_CAPACITY: Integer
 
-    def self.new: (?scope: Integer) -> Coalescer
+    # Scope zero.
+    def self.new: () -> Coalescer
+    # `scope` is an Integer in 0..65_535, carried in the top 16 bits of every id.
+    def self.with_scope: (Integer scope) -> Coalescer
     def scope: () -> Integer
+    # Honoured: Leader, Follower. Refused: :flights_full, :waiters_full, :exhausted.
     def join: (Integer key) -> (Leader | Follower | :flights_full | :waiters_full | :exhausted)
-    def complete: (Integer flight_id) -> (Integer | :stale)
-    def abandon: (Integer flight_id) -> (Integer | :stale)
-    def cancel: (Integer waiter_id) -> (:cancelled | :stale)
+    # Honoured: followers queued for notification. Refused: :stale.
+    def complete: (Integer flight) -> (Integer | :stale)
+    # Honoured: followers queued for notification. Refused: :stale.
+    def abandon: (Integer flight) -> (Integer | :stale)
+    # Honoured: :cancelled. Refused: :stale.
+    def cancel: (Integer waiter) -> (:cancelled | :stale)
+    # The oldest queued notification, or nil when nothing is queued. Never refuses.
+    def poll: () -> Notification?
+    # At most `max` queued notifications, oldest first. Never refuses.
     def drain: (Integer max) -> Array[Notification]
     def flight: (Integer key) -> Integer?
-    def followers: (Integer flight_id) -> Integer?
+    def followers: (Integer flight) -> Integer?
     def in_flight: () -> Integer
     def waiting: () -> Integer
     def pending: () -> Integer
