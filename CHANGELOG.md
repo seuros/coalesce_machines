@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/seuros/coalesce_machines/compare/coalesce_machines/v0.3.0...coalesce_machines/v0.4.0) (2026-11-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* handles are issued through periscope-machines. Every instance can be built with a scope; a handle from another scope is refused before any lookup; all handle kinds of an instance share one sequence; resumed restores the sequence after a restart. The private id layout (SEQUENCE_BITS, SEQUENCE_MAX, scoped, scope_of) is gone from the public API.
+
+### Features
+
+* issue ids through periscope-machines; add reserve, resumed and issued so sibling cores share the one sequence ([0437f1f](https://github.com/seuros/coalesce_machines/commit/0437f1fc773c136bff287d29b6dd44a1ed41368b))
+
 ## [0.3.0](https://github.com/seuros/coalesce_machines/compare/coalesce_machines/v0.2.0...coalesce_machines/v0.3.0) (2026-11-13)
 
 
