@@ -16,12 +16,12 @@ impl Model {
         self.flights.iter().map(|f| f.2.len()).sum::<usize>() + self.ready.len()
     }
 
-    fn join(&mut self, key: u64) -> Result<Joined, Refused> {
+    fn join(&mut self, key: u64) -> Result<Joined, Refusal> {
         let cap = self.waiter_cap;
         let held = self.held();
         if let Some(flight) = self.flights.iter_mut().find(|f| f.1 == key) {
             if held >= cap {
-                return Err(Refused::WaitersFull);
+                return Err(Refusal::WaitersFull);
             }
             self.issued += 1;
             flight.2.push(self.issued);
@@ -31,19 +31,19 @@ impl Model {
             });
         }
         if self.flights.len() >= self.flight_cap {
-            return Err(Refused::FlightsFull);
+            return Err(Refusal::FlightsFull);
         }
         self.issued += 1;
         self.flights.push((self.issued, key, Vec::new()));
         Ok(Joined::Leader(FlightId(self.issued)))
     }
 
-    fn settle(&mut self, id: u64, outcome: Outcome) -> Result<usize, Refused> {
+    fn settle(&mut self, id: u64, outcome: Outcome) -> Result<usize, Refusal> {
         let at = self
             .flights
             .iter()
             .position(|f| f.0 == id)
-            .ok_or(Refused::Stale)?;
+            .ok_or(Refusal::Stale)?;
         let (flight, key, waiters) = self.flights.remove(at);
         for waiter in &waiters {
             self.ready.push_back(Notification {
@@ -56,7 +56,7 @@ impl Model {
         Ok(waiters.len())
     }
 
-    fn cancel(&mut self, id: u64) -> Result<(), Refused> {
+    fn cancel(&mut self, id: u64) -> Result<(), Refusal> {
         for flight in &mut self.flights {
             if let Some(at) = flight.2.iter().position(|w| *w == id) {
                 flight.2.remove(at);
@@ -67,7 +67,7 @@ impl Model {
             .ready
             .iter()
             .position(|n| n.waiter.0 == id)
-            .ok_or(Refused::Stale)?;
+            .ok_or(Refusal::Stale)?;
         self.ready.remove(at);
         Ok(())
     }
@@ -142,13 +142,13 @@ fn run_against_model<const F: usize, const W: usize>(seed: u64, keys: u64, steps
                 false
             }
             _ => {
-                let mut out = [None; 3];
+                let mut out = [Notification::default(); 3];
                 let room = usize::try_from(draws.below(4)).unwrap_or(0);
                 let written = c.drain(&mut out[..room]);
                 assert_eq!(written, room.min(model.ready.len()));
                 for (slot, entry) in out.iter().enumerate() {
                     let want = (slot < written).then(|| model.ready.pop_front()).flatten();
-                    assert_eq!(*entry, want);
+                    assert_eq!(*entry, want.unwrap_or_default());
                 }
                 false
             }

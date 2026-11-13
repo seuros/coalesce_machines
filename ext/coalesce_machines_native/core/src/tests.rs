@@ -64,11 +64,11 @@ fn a_settled_key_is_not_remembered() {
     assert_eq!(c.complete(first), Ok(0));
     let second = leader(&mut c, 7);
     assert_ne!(first, second);
-    assert_eq!(c.complete(first), Err(Refused::Stale));
-    assert_eq!(c.abandon(first), Err(Refused::Stale));
+    assert_eq!(c.complete(first), Err(Refusal::Stale));
+    assert_eq!(c.abandon(first), Err(Refusal::Stale));
     assert_eq!(c.flight(7), Some(second));
     assert_eq!(c.abandon(second), Ok(0));
-    assert_eq!(c.abandon(second), Err(Refused::Stale));
+    assert_eq!(c.abandon(second), Err(Refusal::Stale));
 }
 
 #[test]
@@ -82,22 +82,22 @@ fn stale_ids_are_refused_without_touching_reused_slots() {
     let flight = leader(&mut c, 2);
     let waiter = follower(&mut c, 2);
     let before = c.clone();
-    assert_eq!(c.complete(old_flight), Err(Refused::Stale));
-    assert_eq!(c.abandon(old_flight), Err(Refused::Stale));
-    assert_eq!(c.cancel(old_waiter), Err(Refused::Stale));
+    assert_eq!(c.complete(old_flight), Err(Refusal::Stale));
+    assert_eq!(c.abandon(old_flight), Err(Refusal::Stale));
+    assert_eq!(c.cancel(old_waiter), Err(Refusal::Stale));
     assert_eq!(c.followers(old_flight), None);
     for raw in [0, u64::MAX, flight.raw() + 100] {
-        assert_eq!(c.complete(FlightId::from_raw(raw)), Err(Refused::Stale));
-        assert_eq!(c.cancel(WaiterId::from_raw(raw)), Err(Refused::Stale));
+        assert_eq!(c.complete(FlightId::from_raw(raw)), Err(Refusal::Stale));
+        assert_eq!(c.cancel(WaiterId::from_raw(raw)), Err(Refusal::Stale));
     }
     // A flight id is not a waiter id and the reverse.
     assert_eq!(
         c.cancel(WaiterId::from_raw(flight.raw())),
-        Err(Refused::Stale)
+        Err(Refusal::Stale)
     );
     assert_eq!(
         c.complete(FlightId::from_raw(waiter.raw())),
-        Err(Refused::Stale)
+        Err(Refusal::Stale)
     );
     assert_eq!(c, before);
     assert_eq!(c.complete(FlightId::from_raw(flight.raw())), Ok(1));
@@ -132,7 +132,7 @@ fn cancellation_withdraws_waiting_and_queued_followers() {
     assert_eq!(c.cancel(w[0]), Ok(()));
     assert_eq!(c.cancel(w[2]), Ok(()));
     assert_eq!(c.cancel(w[4]), Ok(()));
-    assert_eq!(c.cancel(w[4]), Err(Refused::Stale));
+    assert_eq!(c.cancel(w[4]), Err(Refusal::Stale));
     assert_eq!(c.followers(flight), Some(2));
     let late = follower(&mut c, 1);
     assert_eq!(c.complete(flight), Ok(3));
@@ -144,8 +144,8 @@ fn cancellation_withdraws_waiting_and_queued_followers() {
         [w[1], late]
     );
     // Drained: the id is spent.
-    assert_eq!(c.cancel(w[1]), Err(Refused::Stale));
-    assert_eq!(c.cancel(late), Err(Refused::Stale));
+    assert_eq!(c.cancel(w[1]), Err(Refusal::Stale));
+    assert_eq!(c.cancel(late), Err(Refusal::Stale));
     assert_eq!((c.in_flight(), c.waiting(), c.pending()), (0, 0, 0));
 }
 
@@ -167,22 +167,22 @@ fn full_tables_refuse_without_mutation() {
     let one = leader(&mut c, 1);
     let _two = leader(&mut c, 2);
     let before = c.clone();
-    assert_eq!(c.join(3), Err(Refused::FlightsFull));
+    assert_eq!(c.join(3), Err(Refusal::FlightsFull));
     assert_eq!(c, before);
 
     let a = follower(&mut c, 1);
     let _b = follower(&mut c, 2);
     let before = c.clone();
-    assert_eq!(c.join(1), Err(Refused::WaitersFull));
-    assert_eq!(c.join(2), Err(Refused::WaitersFull));
-    assert_eq!(c.join(3), Err(Refused::FlightsFull));
+    assert_eq!(c.join(1), Err(Refusal::WaitersFull));
+    assert_eq!(c.join(2), Err(Refusal::WaitersFull));
+    assert_eq!(c.join(3), Err(Refusal::FlightsFull));
     assert_eq!(c, before);
 
     // An undrained notification still occupies its waiter slot.
     assert_eq!(c.complete(one), Ok(1));
-    assert_eq!(c.join(2), Err(Refused::WaitersFull));
+    assert_eq!(c.join(2), Err(Refusal::WaitersFull));
     let again = leader(&mut c, 1);
-    assert_eq!(c.join(1), Err(Refused::WaitersFull));
+    assert_eq!(c.join(1), Err(Refusal::WaitersFull));
     assert_eq!(c.poll().map(|n| n.waiter), Some(a));
     assert!(matches!(c.join(1), Ok(Joined::Follower { flight, .. }) if flight == again));
 }
@@ -190,13 +190,13 @@ fn full_tables_refuse_without_mutation() {
 #[test]
 fn zero_capacities_refuse_everything() {
     let mut none = Coalescer::<0, 0>::new();
-    assert_eq!(none.join(1), Err(Refused::FlightsFull));
+    assert_eq!(none.join(1), Err(Refusal::FlightsFull));
     assert_eq!(none.poll(), None);
     assert_eq!((none.flight_capacity(), none.waiter_capacity()), (0, 0));
 
     let mut solo = Coalescer::<1, 0>::default();
     let flight = leader(&mut solo, 1);
-    assert_eq!(solo.join(1), Err(Refused::WaitersFull));
+    assert_eq!(solo.join(1), Err(Refusal::WaitersFull));
     assert_eq!(solo.complete(flight), Ok(0));
     assert_eq!((solo.flight_capacity(), solo.waiter_capacity()), (1, 0));
 }
@@ -217,14 +217,14 @@ fn drain_is_bounded_and_resumable_across_flights() {
     assert_eq!(c.drain(&mut []), 0);
     assert_eq!(c.pending(), 4);
 
-    let mut out = [None; 3];
+    let mut out = [Notification::default(); 3];
     assert_eq!(c.drain(&mut out), 3);
     assert_eq!(
-        out.map(|n| n.map(|n| (n.waiter, n.flight, n.key, n.outcome))),
+        out.map(|n| (n.waiter, n.flight, n.key, n.outcome)),
         [
-            Some((b, f2, 2, Outcome::Abandoned)),
-            Some((fourth, f2, 2, Outcome::Abandoned)),
-            Some((a, f1, 1, Outcome::Completed)),
+            (b, f2, 2, Outcome::Abandoned),
+            (fourth, f2, 2, Outcome::Abandoned),
+            (a, f1, 1, Outcome::Completed),
         ]
     );
     assert_eq!(c.pending(), 1);
@@ -234,18 +234,55 @@ fn drain_is_bounded_and_resumable_across_flights() {
     let fifth = follower(&mut c, 3);
     assert_eq!(c.complete(f3), Ok(1));
 
-    let mut out = [None; 3];
+    let untouched = Notification {
+        waiter: WaiterId::from_raw(99),
+        flight: FlightId::from_raw(98),
+        key: 97,
+        outcome: Outcome::Completed,
+    };
+    let mut out = [untouched; 3];
     assert_eq!(c.drain(&mut out), 2);
-    assert_eq!(
-        out.map(|n| n.map(|n| n.waiter)),
-        [Some(third), Some(fifth), None]
-    );
-    assert_eq!(c.drain(&mut out), 0);
+    assert_eq!((out[0].waiter, out[1].waiter), (third, fifth));
     // Untouched past the count.
+    assert_eq!(out[2], untouched);
+    let before = out;
+    assert_eq!(c.drain(&mut out), 0);
+    assert_eq!(out, before);
+}
+
+#[test]
+fn defaults_are_placeholders_the_coalescer_never_emits() {
+    let blank = Notification::default();
     assert_eq!(
-        out.map(|n| n.map(|n| n.waiter)),
-        [Some(third), Some(fifth), None]
+        (blank.waiter.raw(), blank.flight.raw(), blank.key),
+        (0, 0, 0)
     );
+    assert_eq!(blank.outcome, Outcome::default());
+    assert_eq!(Outcome::default(), Outcome::Abandoned);
+    assert_eq!(FlightId::default(), FlightId::from_raw(0));
+    assert_eq!(WaiterId::default(), WaiterId::from_raw(0));
+
+    // Raw zero is never issued, in any scope, so a placeholder names nothing.
+    let mut c = Coalescer::<1, 1>::new();
+    let flight = leader(&mut c, 0);
+    let waiter = follower(&mut c, 0);
+    assert_ne!(flight, FlightId::default());
+    assert_ne!(waiter, WaiterId::default());
+    let before = c.clone();
+    assert_eq!(c.complete(FlightId::default()), Err(Refusal::Stale));
+    assert_eq!(c.abandon(FlightId::default()), Err(Refusal::Stale));
+    assert_eq!(c.cancel(WaiterId::default()), Err(Refusal::Stale));
+    assert_eq!(c.followers(FlightId::default()), None);
+    assert_eq!(c, before);
+    assert_eq!(c.abandon(flight), Ok(1));
+    assert_ne!(c.poll(), Some(blank));
+}
+
+#[test]
+#[allow(deprecated)]
+fn the_old_refusal_name_still_resolves() {
+    let old: Refused = Refusal::Stale;
+    assert_eq!(old, Refusal::Stale);
 }
 
 #[test]
@@ -276,23 +313,23 @@ fn key_and_id_limits() {
     let waiter = follower(&mut c, 1);
     assert_eq!((flight.raw(), waiter.raw()), (u64::MAX - 1, u64::MAX));
     let before = c.clone();
-    assert_eq!(c.join(1), Err(Refused::Exhausted));
-    assert_eq!(c.join(2), Err(Refused::Exhausted));
+    assert_eq!(c.join(1), Err(Refusal::Exhausted));
+    assert_eq!(c.join(2), Err(Refusal::Exhausted));
     assert_eq!(c, before);
     // What is registered still settles and drains.
     assert_eq!(c.complete(flight), Ok(1));
     assert_eq!(c.poll().map(|n| n.waiter), Some(waiter));
-    assert_eq!(c.join(1), Err(Refused::Exhausted));
+    assert_eq!(c.join(1), Err(Refusal::Exhausted));
 }
 
 #[test]
 fn refusals_describe_themselves() {
     use std::string::ToString;
     for refusal in [
-        Refused::FlightsFull,
-        Refused::WaitersFull,
-        Refused::Exhausted,
-        Refused::Stale,
+        Refusal::FlightsFull,
+        Refusal::WaitersFull,
+        Refusal::Exhausted,
+        Refusal::Stale,
     ] {
         assert_ne!(refusal.to_string(), "");
     }
@@ -320,9 +357,9 @@ fn scopes_keep_the_ids_of_separate_coalescers_apart() {
 
     // A foreign id names nothing here, and the refusal changes nothing.
     let before = near.clone();
-    assert_eq!(near.cancel(far_waiter), Err(Refused::Stale));
-    assert_eq!(near.complete(far_flight), Err(Refused::Stale));
-    assert_eq!(near.abandon(far_flight), Err(Refused::Stale));
+    assert_eq!(near.cancel(far_waiter), Err(Refusal::Stale));
+    assert_eq!(near.complete(far_flight), Err(Refusal::Stale));
+    assert_eq!(near.abandon(far_flight), Err(Refusal::Stale));
     assert_eq!(near.followers(far_flight), None);
     assert_eq!(near, before);
     assert_eq!(near.cancel(near_waiter), Ok(()));

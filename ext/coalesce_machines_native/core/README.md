@@ -19,7 +19,7 @@ That is the difference from `dedup-machines`, which remembers completed keys to
 suppress repeated effects.
 
 ```rust
-use coalesce_machines::{Coalescer, Joined, Outcome};
+use coalesce_machines::{Coalescer, Joined, Notification, Outcome};
 
 let mut flights = Coalescer::<8, 32>::new();
 let Ok(Joined::Leader(flight)) = flights.join(42) else { panic!("first caller leads") };
@@ -30,9 +30,9 @@ assert_eq!(shared, flight);
 // ... the leader computes, the caller stores the result under `flight` ...
 assert_eq!(flights.complete(flight), Ok(1));
 
-let mut out = [None; 4];
+let mut out = [Notification::default(); 4];
 assert_eq!(flights.drain(&mut out), 1);
-let note = out[0].expect("one follower to wake");
+let note = out[0];
 assert_eq!((note.waiter, note.flight, note.key), (waiter, flight, 42));
 assert_eq!(note.outcome, Outcome::Completed);
 
@@ -44,19 +44,19 @@ assert!(matches!(flights.join(42), Ok(Joined::Leader(_))));
 
 - **Capacities.** `Coalescer<FLIGHTS, WAITERS>`: at most `FLIGHTS` keys in
   flight; at most `WAITERS` waiting followers plus undrained notifications,
-  across all keys. A full table answers `Refused::FlightsFull` or
-  `Refused::WaitersFull`; nothing is evicted. Drain to free waiter slots.
+  across all keys. A full table answers `Refusal::FlightsFull` or
+  `Refusal::WaitersFull`; nothing is evicted. Drain to free waiter slots.
 - **Ids.** `FlightId` and `WaiterId` come from one `u64` counter and are never
-  reissued, so a settled, cancelled or drained id is `Refused::Stale` forever,
+  reissued, so a settled, cancelled or drained id is `Refusal::Stale` forever,
   and a slot reused by a later registration cannot be settled by an old id.
   After `SEQUENCE_MAX` (2^48 - 1) registrations `join` answers
-  `Refused::Exhausted`. `raw` / `from_raw` carry ids across FFI or queues. A `FlightId` is a capability:
+  `Refusal::Exhausted`. `raw` / `from_raw` carry ids across FFI or queues. A `FlightId` is a capability:
   whoever holds it can settle the flight, so hand it only to the leader.
 - **Scopes.** Ids are plain integers, so two coalescers in the same scope issue
   the same ones and an id handed to the wrong coalescer can name a live
   registration there. `Coalescer::with_scope(scope)` puts a caller-chosen `u16`
   in the top 16 bits of every id; an id from another scope is always
-  `Refused::Stale`. `new()` is scope zero. The coalescer cannot choose a scope
+  `Refusal::Stale`. `new()` is scope zero. The coalescer cannot choose a scope
   itself: keeping them distinct is the caller's job. `scoped` and `scope_of`
   expose the layout to cores that issue ids alongside a coalescer.
 - **Refusals change nothing.** Every `Err` leaves the coalescer bit-for-bit as
@@ -67,9 +67,16 @@ assert!(matches!(flights.join(42), Ok(Joined::Leader(_))));
   zero followers; `followers(flight)` tells the caller when nobody is left, and
   stopping the leader is the caller's call.
 - **Notifications.** Queued in settlement order, then join order within a
-  flight. `poll` takes one; `drain(&mut [Option<Notification>])` fills a
-  caller-sized buffer and leaves the remainder queued, in order, for the next
-  call.
+  flight. `poll` takes one; `drain(out: &mut [Notification])` writes the first
+  `n` entries of a caller-sized buffer, returns `n`, leaves the rest of the
+  buffer untouched and the remainder queued, in order, for the next call.
+- **Placeholders.** `Notification`, `FlightId`, `WaiterId` and `Outcome`
+  implement `Default` so a buffer is `[Notification::default(); N]`. The
+  default is never emitted: its ids are raw zero, which is never issued and is
+  `Refusal::Stale` everywhere, and its outcome (`Abandoned`) describes no
+  flight. Read only the `n` entries a `drain` reported.
+- **Naming.** The refusal enum is `Refusal`. `Refused` remains as a deprecated
+  alias for one release.
 - **Abandon.** `abandon(flight)` settles without a result. Followers are
   notified with `Outcome::Abandoned` and join again; the first becomes leader.
 

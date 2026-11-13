@@ -4,7 +4,7 @@ mod init;
 use std::cell::RefCell;
 
 use coalesce_machines::{
-    Coalescer as Core, FlightId, Joined, Notification, Outcome, Refused, WaiterId,
+    Coalescer as Core, FlightId, Joined, Notification, Outcome, Refusal, WaiterId,
 };
 use magnus::{
     Error, Integer, RArray, Ruby, TryConvert, Value,
@@ -48,11 +48,11 @@ fn scope_keyword(ruby: &Ruby, args: &[Value]) -> Result<u16, Error> {
         .map_err(|_| Error::new(ruby.exception_range_error(), "scope must be in 0..=65535"))
 }
 
-fn refusal(ruby: &Ruby, refused: Refused) -> Value {
+fn refusal(ruby: &Ruby, refused: Refusal) -> Value {
     ruby.to_symbol(match refused {
-        Refused::FlightsFull => "flights_full",
-        Refused::WaitersFull => "waiters_full",
-        Refused::Exhausted => "exhausted",
+        Refusal::FlightsFull => "flights_full",
+        Refusal::WaitersFull => "waiters_full",
+        Refusal::Exhausted => "exhausted",
         _ => "stale",
     })
     .as_value()
@@ -92,7 +92,7 @@ impl Coalescer {
         }
     }
 
-    fn settled(ruby: &Ruby, outcome: Result<usize, Refused>) -> Value {
+    fn settled(ruby: &Ruby, outcome: Result<usize, Refusal>) -> Value {
         match outcome {
             Ok(notified) => ruby.integer_from_u64(notified as u64).as_value(),
             Err(refused) => refusal(ruby, refused),
@@ -134,10 +134,10 @@ impl Coalescer {
         // Resolve the class before taking anything, so a failure loses nothing.
         let class = data(ruby, "Notification")?;
         let room = usize::try_from(max.0).map_or(WAITER_CAPACITY, |max| max.min(WAITER_CAPACITY));
-        let mut buffer: [Option<Notification>; WAITER_CAPACITY] = [None; WAITER_CAPACITY];
+        let mut buffer = [Notification::default(); WAITER_CAPACITY];
         let written = this.core.borrow_mut().drain(&mut buffer[..room]);
         let notifications = ruby.ary_new_capa(written);
-        for note in buffer.iter().take(written).flatten() {
+        for note in buffer.iter().take(written) {
             let outcome = ruby.to_symbol(match note.outcome {
                 Outcome::Completed => "completed",
                 Outcome::Abandoned => "abandoned",

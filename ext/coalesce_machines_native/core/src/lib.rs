@@ -6,7 +6,7 @@ use core::fmt;
 /// Bits of an id that count registrations; the bits above carry the scope.
 pub const SEQUENCE_BITS: u32 = 48;
 
-/// The last sequence number a coalescer issues before it is [`Refused::Exhausted`].
+/// The last sequence number a coalescer issues before it is [`Refusal::Exhausted`].
 pub const SEQUENCE_MAX: u64 = (1 << SEQUENCE_BITS) - 1;
 
 /// Build a raw id from the issuer's scope and a sequence number at or below [`SEQUENCE_MAX`].
@@ -27,16 +27,22 @@ pub const fn scope_of(raw: u64) -> u16 {
 ///
 /// Issued to the leader by [`Coalescer::join`]. Unique for the lifetime of the
 /// coalescer that issued it: an id is never reissued, so a settled flight's id
-/// is refused as [`Refused::Stale`] forever after. It carries its issuer's
+/// is refused as [`Refusal::Stale`] forever after. It carries its issuer's
 /// scope, so coalescers built with different scopes never share an id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// `FlightId::default()` is raw zero, which is never issued: a placeholder for
+/// filling an output buffer, refused as [`Refusal::Stale`] everywhere.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FlightId(u64);
 
 /// Identity of one follower's registration on a flight.
 ///
 /// This is the notification id: the caller parks whatever is waiting under it
 /// and wakes it when a [`Notification`] carrying the same id is drained.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// `WaiterId::default()` is raw zero, which is never issued: a placeholder for
+/// filling an output buffer, refused as [`Refusal::Stale`] everywhere.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WaiterId(u64);
 
 macro_rules! raw_id {
@@ -86,7 +92,7 @@ pub enum Joined {
 /// Why a call changed nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Refused {
+pub enum Refusal {
     /// Every flight slot holds an unsettled flight; no new key can lead.
     FlightsFull,
     /// Every waiter slot holds a waiting follower or an undrained notification.
@@ -98,7 +104,7 @@ pub enum Refused {
     Stale,
 }
 
-impl fmt::Display for Refused {
+impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::FlightsFull => "every flight slot is in use",
@@ -109,19 +115,33 @@ impl fmt::Display for Refused {
     }
 }
 
-impl core::error::Error for Refused {}
+impl core::error::Error for Refusal {}
+
+/// The former name of [`Refusal`].
+#[deprecated(note = "renamed to `Refusal`")]
+pub type Refused = Refusal;
 
 /// How a flight ended. The result itself is the caller's to keep.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Outcome::default()` is [`Outcome::Abandoned`]. It exists only so a
+/// placeholder [`Notification`] can be built; it says nothing about any flight.
+/// `Abandoned` is the one that promises no result if a placeholder is ever
+/// read by mistake.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Outcome {
     /// The leader finished; the caller holds a result to share with followers.
     Completed,
     /// The leader gave up without a result; followers should join again.
+    #[default]
     Abandoned,
 }
 
 /// One follower to wake, emitted when its flight settles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Notification::default()` is a placeholder for sizing the buffer handed to
+/// [`Coalescer::drain`], e.g. `[Notification::default(); 8]`. The coalescer
+/// never emits it: its ids are raw zero, which is never issued.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Notification {
     /// The follower's id, as returned by [`Coalescer::join`].
     pub waiter: WaiterId,
@@ -202,7 +222,7 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
     /// Ids are plain integers, so two coalescers in the same scope issue the
     /// same ones, and an id handed to the wrong coalescer can name a live
     /// registration there. Give each coalescer whose ids could meet its own
-    /// scope: an id from another scope is then always [`Refused::Stale`].
+    /// scope: an id from another scope is then always [`Refusal::Stale`].
     /// The coalescer cannot pick a scope itself; keeping them distinct is the
     /// caller's job.
     #[must_use]
@@ -231,15 +251,15 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
     ///
     /// # Errors
     ///
-    /// [`Refused::FlightsFull`] when the key is new and no flight slot is free,
-    /// [`Refused::WaitersFull`] when the key is in flight and no waiter slot is
-    /// free, [`Refused::Exhausted`] when no id is left. Nothing changes.
-    pub fn join(&mut self, key: u64) -> Result<Joined, Refused> {
+    /// [`Refusal::FlightsFull`] when the key is new and no flight slot is free,
+    /// [`Refusal::WaitersFull`] when the key is in flight and no waiter slot is
+    /// free, [`Refusal::Exhausted`] when no id is left. Nothing changes.
+    pub fn join(&mut self, key: u64) -> Result<Joined, Refusal> {
         if let Some(home) = self.slot_of_key(key) {
-            let slot = free_slot(&self.waiters).ok_or(Refused::WaitersFull)?;
+            let slot = free_slot(&self.waiters).ok_or(Refusal::WaitersFull)?;
             let (sequence, id) = self.next_id()?;
             let Some(flight) = self.flights[home].as_mut() else {
-                return Err(Refused::Stale);
+                return Err(Refusal::Stale);
             };
             self.waiters[slot] = Some(Waiter {
                 id,
@@ -256,7 +276,7 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
                 flight: FlightId(flight.id),
             });
         }
-        let slot = free_slot(&self.flights).ok_or(Refused::FlightsFull)?;
+        let slot = free_slot(&self.flights).ok_or(Refusal::FlightsFull)?;
         let (sequence, id) = self.next_id()?;
         self.flights[slot] = Some(Flight {
             id,
@@ -276,8 +296,8 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
     ///
     /// # Errors
     ///
-    /// [`Refused::Stale`] when `flight` is not in flight. Nothing changes.
-    pub fn complete(&mut self, flight: FlightId) -> Result<usize, Refused> {
+    /// [`Refusal::Stale`] when `flight` is not in flight. Nothing changes.
+    pub fn complete(&mut self, flight: FlightId) -> Result<usize, Refusal> {
         self.settle(flight, Outcome::Completed)
     }
 
@@ -289,8 +309,8 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
     ///
     /// # Errors
     ///
-    /// [`Refused::Stale`] when `flight` is not in flight. Nothing changes.
-    pub fn abandon(&mut self, flight: FlightId) -> Result<usize, Refused> {
+    /// [`Refusal::Stale`] when `flight` is not in flight. Nothing changes.
+    pub fn abandon(&mut self, flight: FlightId) -> Result<usize, Refusal> {
         self.settle(flight, Outcome::Abandoned)
     }
 
@@ -304,14 +324,14 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
     ///
     /// # Errors
     ///
-    /// [`Refused::Stale`] when `waiter` is not registered. Nothing changes.
-    pub fn cancel(&mut self, waiter: WaiterId) -> Result<(), Refused> {
+    /// [`Refusal::Stale`] when `waiter` is not registered. Nothing changes.
+    pub fn cancel(&mut self, waiter: WaiterId) -> Result<(), Refusal> {
         let (slot, found) = self
             .waiters
             .iter()
             .enumerate()
             .find_map(|(slot, entry)| Some((slot, entry.filter(|w| w.id == waiter.0)?)))
-            .ok_or(Refused::Stale)?;
+            .ok_or(Refusal::Stale)?;
         let unlinked = if found.outcome.is_some() {
             unlink(&mut self.waiters, &mut self.ready, slot)
         } else if let Some(flight) = self.flights.get_mut(found.home).and_then(Option::as_mut) {
@@ -320,7 +340,7 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
             false
         };
         if !unlinked {
-            return Err(Refused::Stale);
+            return Err(Refusal::Stale);
         }
         self.waiters[slot] = None;
         Ok(())
@@ -340,15 +360,16 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
 
     /// Move queued notifications into `out`, oldest first, and return how many.
     ///
-    /// Writes `Some` into the first `n` entries and leaves the rest untouched.
-    /// Resumable: whatever did not fit stays queued, in order, for the next call.
-    pub fn drain(&mut self, out: &mut [Option<Notification>]) -> usize {
+    /// Writes the first `n` entries and leaves the rest untouched; only those
+    /// `n` are notifications. Resumable: whatever did not fit stays queued, in
+    /// order, for the next call.
+    pub fn drain(&mut self, out: &mut [Notification]) -> usize {
         let mut written = 0;
         for entry in out {
             let Some(notification) = self.poll() else {
                 break;
             };
-            *entry = Some(notification);
+            *entry = notification;
             written += 1;
         }
         written
@@ -398,9 +419,9 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
         WAITERS
     }
 
-    fn settle(&mut self, flight: FlightId, outcome: Outcome) -> Result<usize, Refused> {
-        let slot = self.slot_of_flight(flight).ok_or(Refused::Stale)?;
-        let settled = self.flights[slot].take().ok_or(Refused::Stale)?;
+    fn settle(&mut self, flight: FlightId, outcome: Outcome) -> Result<usize, Refusal> {
+        let slot = self.slot_of_flight(flight).ok_or(Refusal::Stale)?;
+        let settled = self.flights[slot].take().ok_or(Refusal::Stale)?;
         self.in_flight -= 1;
         let mut cursor = settled.followers.head;
         while let Some(index) = cursor {
@@ -415,10 +436,10 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
     }
 
     /// The next sequence number and the scoped id that carries it; issues nothing yet.
-    const fn next_id(&self) -> Result<(u64, u64), Refused> {
+    const fn next_id(&self) -> Result<(u64, u64), Refusal> {
         let sequence = self.issued + 1;
         if sequence > SEQUENCE_MAX {
-            return Err(Refused::Exhausted);
+            return Err(Refusal::Exhausted);
         }
         Ok((sequence, scoped(self.scope, sequence)))
     }
