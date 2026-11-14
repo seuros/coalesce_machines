@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/seuros/coalesce_machines/compare/coalesce_machines/v0.7.0...coalesce_machines/v0.7.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **deps:** require matryona-machines &gt;= 0.4 ([f762a91](https://github.com/seuros/coalesce_machines/commit/f762a91e08bfdf8f9db13f3c9557a417f30113bd))
+
 ## [0.7.0](https://github.com/seuros/coalesce_machines/compare/coalesce_machines/v0.6.0...coalesce_machines/v0.7.0) (2026-11-14)
 
 
