@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.0](https://github.com/seuros/coalesce_machines/compare/coalesce-machines-v0.7.0...coalesce-machines-v0.8.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt matryona-machines 0.2: pinned Data classes, symbols! tables for refusals and outcomes
+
+### Features
+
+* adopt matryona-machines 0.2: pinned Data classes, symbols! tables for refusals and outcomes ([afc1ee9](https://github.com/seuros/coalesce_machines/commit/afc1ee958d70b905471d935b10e82f3eb31db83d))
+
 ## [0.7.0](https://github.com/seuros/coalesce_machines/compare/coalesce-machines-v0.6.0...coalesce-machines-v0.7.0) (2026-11-14)
 
 
