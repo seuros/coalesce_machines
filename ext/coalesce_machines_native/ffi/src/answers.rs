@@ -3,65 +3,52 @@
 //! mutating calls build on a copy of the coalescer kept only once the answer
 //! exists, so nothing the binding does can lose the work. The classes are
 //! defined once, at init, and pinned.
-use std::sync::OnceLock;
-
 use coalesce_machines::{Joined, Notification, Refusal};
-use magnus::value::Opaque;
-use magnus::{Error, RClass, RModule, RStruct, Ruby, Value, prelude::*};
+use magnus::{Error, RModule, RStruct, Ruby, Value, prelude::*};
+use matryona_machines::ruby::{Class, Registry, Symbols};
 
-use crate::values;
+use crate::values::Outcomes;
 
 /// `CoalesceMachines::Leader`, `Follower` and `Notification`.
 pub struct Classes {
-    leader: Opaque<RClass>,
-    follower: Opaque<RClass>,
-    notification: Opaque<RClass>,
+    leader: Class,
+    follower: Class,
+    notification: Class,
 }
 
-static CLASSES: OnceLock<Classes> = OnceLock::new();
+static CLASSES: Registry<Classes> = Registry::new("coalesce_machines");
 
-/// Define the three `Data` classes under `module`; Ruby adds their validating
-/// `initialize` when it reopens them.
+/// Define the three `Data` classes under `module` and pin them as defined,
+/// with no lookup back by name; Ruby adds their validating `initialize` when
+/// it reopens them.
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let class = |name: &str, data: RClass| {
-        // Held in a static, so pinned: `GC.compact` must not move it.
-        ruby.gc_register_mark_object(data);
-        module.const_set(name, data).map(|()| data.into())
-    };
+    let leader = ruby.define_data(None, ("flight",))?;
+    let follower = ruby.define_data(None, ("waiter", "flight"))?;
+    let notification = ruby.define_data(None, ("waiter", "flight", "key", "outcome"))?;
+    module.const_set("Leader", leader)?;
+    module.const_set("Follower", follower)?;
+    module.const_set("Notification", notification)?;
     let classes = Classes {
-        leader: class("Leader", ruby.define_data(None, ("flight",))?)?,
-        follower: class("Follower", ruby.define_data(None, ("waiter", "flight"))?)?,
-        notification: class(
-            "Notification",
-            ruby.define_data(None, ("waiter", "flight", "key", "outcome"))?,
-        )?,
+        leader: Class::pin(ruby, leader),
+        follower: Class::pin(ruby, follower),
+        notification: Class::pin(ruby, notification),
     };
-    CLASSES.set(classes).map_err(|_| {
-        Error::new(
-            ruby.exception_load_error(),
-            "the coalesce_machines extension was initialised twice",
-        )
-    })
+    CLASSES.set(ruby, classes).map(drop)
 }
 
 /// The classes defined at init.
 pub fn classes(ruby: &Ruby) -> Result<&'static Classes, Error> {
-    CLASSES.get().ok_or_else(|| {
-        Error::new(
-            ruby.exception_load_error(),
-            "the coalesce_machines extension is not initialised",
-        )
-    })
+    CLASSES.get(ruby)
 }
 
 /// A frozen instance of `class` holding `members`, in order. Allocation and
 /// in-range member writes on a fresh instance do not raise.
 fn instance<const N: usize>(
     ruby: &Ruby,
-    class: Opaque<RClass>,
+    class: Class,
     members: [Value; N],
 ) -> Result<Value, Error> {
-    let instance = RStruct::from_value(ruby.get_inner(class).obj_alloc()?).ok_or_else(|| {
+    let instance = RStruct::from_value(class.get(ruby).obj_alloc()?).ok_or_else(|| {
         Error::new(
             ruby.exception_type_error(),
             "a Data class allocated a non-Data",
@@ -96,21 +83,25 @@ impl Classes {
             integer(ruby, note.waiter().raw()),
             integer(ruby, note.flight().raw()),
             integer(ruby, note.key()),
-            values::outcome(ruby, note.outcome()).as_value(),
+            Outcomes::symbol(ruby, note.outcome()).as_value(),
         ];
         instance(ruby, self.notification, members)
     }
 }
 
-/// Ruby symbol of a refusal: the snake case of the core variant.
+matryona_machines::symbols! {
+    /// A refusal as its Symbol: the snake case of the core variant.
+    Refusals for Refusal as "refusal" {
+        FlightsFull => "flights_full",
+        WaitersFull => "waiters_full",
+        Exhausted => "exhausted",
+        Stale => "stale",
+    }
+}
+
+/// Ruby symbol of a refusal.
 pub fn refusal(ruby: &Ruby, refused: Refusal) -> Value {
-    ruby.to_symbol(match refused {
-        Refusal::FlightsFull => "flights_full",
-        Refusal::WaitersFull => "waiters_full",
-        Refusal::Exhausted => "exhausted",
-        Refusal::Stale => "stale",
-    })
-    .as_value()
+    Refusals::symbol(ruby, refused).as_value()
 }
 
 /// The honoured answer built by `honoured`, or the refusal's symbol.

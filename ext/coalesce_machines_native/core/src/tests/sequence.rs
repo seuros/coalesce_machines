@@ -1,5 +1,6 @@
 //! One sequence per coalescer: flights, waiters and reserved ids never meet,
 //! and a restart resumes the sequence instead of starting it again.
+use matryona_machines::testing::refuses;
 use std::collections::BTreeSet;
 
 use periscope_machines::{SEQUENCE_MAX, scoped};
@@ -71,7 +72,7 @@ fn owns_proves_origin_for_every_kind_and_nothing_else() {
 fn no_id_of_any_kind_repeats_across_join_and_reserve() {
     for seed in 0..16 {
         let scope = scope_for(seed);
-        let mut draws = Draws(seed);
+        let mut draws = Draws::new(seed);
         let mut c = Coalescer::<3, 4>::with_scope(scope);
         let mut seen = BTreeSet::new();
         let mut kept = Vec::new();
@@ -184,15 +185,11 @@ fn the_last_id_is_reserved_then_the_sequence_is_spent() {
     assert_eq!(c.remaining(), 1);
     assert_eq!(c.reserve(), Ok(u64::MAX));
     assert_eq!((c.remaining(), c.issued()), (0, SEQUENCE_MAX));
-    let before = c.clone();
-    assert_eq!(c.reserve(), Err(Refusal::Exhausted));
-    assert_eq!(c.join(1), Err(Refusal::Exhausted));
-    assert_eq!(c, before);
+    refuses(&mut c, Refusal::Exhausted, Coalescer::reserve);
+    refuses(&mut c, Refusal::Exhausted, |r| r.join(1));
 
     // Spent from the start: every kind is refused alike.
     let mut spent: Coalescer<2, 2> = near_the_end(2, 0);
-    let before = spent.clone();
-    assert_eq!(spent.reserve(), Err(Refusal::Exhausted));
-    assert_eq!(spent.join(1), Err(Refusal::Exhausted));
-    assert_eq!(spent, before);
+    refuses(&mut spent, Refusal::Exhausted, Coalescer::reserve);
+    refuses(&mut spent, Refusal::Exhausted, |r| r.join(1));
 }

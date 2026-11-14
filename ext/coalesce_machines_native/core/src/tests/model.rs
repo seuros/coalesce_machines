@@ -82,18 +82,7 @@ impl Model {
     }
 }
 
-pub(super) struct Draws(pub(super) u64);
-
-impl Draws {
-    pub(super) fn below(&mut self, bound: u64) -> u64 {
-        // splitmix64
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        (z ^ (z >> 31)) % bound
-    }
-}
+pub(super) use matryona_machines::testing::SplitMix64 as Draws;
 
 fn agree<const F: usize, const W: usize>(c: &Coalescer<F, W>, model: &Model, keys: u64) {
     assert_eq!(c.in_flight(), model.flights.len());
@@ -115,7 +104,7 @@ fn run_against_model<const F: usize, const W: usize>(
     keys: u64,
     steps: usize,
 ) {
-    let mut draws = Draws(seed);
+    let mut draws = Draws::new(seed);
     let mut c = Coalescer::<F, W>::with_scope(scope);
     assert_eq!(c.scope(), scope);
     let mut model = Model {

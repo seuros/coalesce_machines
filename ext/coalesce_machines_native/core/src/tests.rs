@@ -1,5 +1,6 @@
 extern crate std;
 
+use matryona_machines::testing::{refuses, unchanged};
 use std::assert_matches;
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -184,17 +185,13 @@ fn full_tables_refuse_without_mutation() {
     let mut c = Coalescer::<2, 2>::new();
     let one = leader(&mut c, 1);
     let _two = leader(&mut c, 2);
-    let before = c.clone();
-    assert_eq!(c.join(3), Err(Refusal::FlightsFull));
-    assert_eq!(c, before);
+    refuses(&mut c, Refusal::FlightsFull, |r| r.join(3));
 
     let a = follower(&mut c, 1);
     let _b = follower(&mut c, 2);
-    let before = c.clone();
-    assert_eq!(c.join(1), Err(Refusal::WaitersFull));
-    assert_eq!(c.join(2), Err(Refusal::WaitersFull));
-    assert_eq!(c.join(3), Err(Refusal::FlightsFull));
-    assert_eq!(c, before);
+    refuses(&mut c, Refusal::WaitersFull, |r| r.join(1));
+    refuses(&mut c, Refusal::WaitersFull, |r| r.join(2));
+    refuses(&mut c, Refusal::FlightsFull, |r| r.join(3));
 
     // An undrained notification still occupies its waiter slot.
     assert_eq!(c.complete(one), Ok(1));
@@ -263,9 +260,8 @@ fn drain_is_bounded_and_resumable_across_flights() {
     assert_eq!((out[0].waiter(), out[1].waiter()), (third, fifth));
     // Untouched past the count.
     assert_eq!(out[2], untouched);
-    let before = out;
-    assert_eq!(c.drain(&mut out), 0);
-    assert_eq!(out, before);
+    // Nothing left: the buffer is not written at all.
+    assert_eq!(unchanged(&mut out, |out| c.drain(out)), 0);
 }
 
 #[test]
@@ -325,10 +321,8 @@ fn key_and_id_limits() {
     let flight = leader(&mut c, 1);
     let waiter = follower(&mut c, 1);
     assert_eq!((flight.raw(), waiter.raw()), (u64::MAX - 1, u64::MAX));
-    let before = c.clone();
-    assert_eq!(c.join(1), Err(Refusal::Exhausted));
-    assert_eq!(c.join(2), Err(Refusal::Exhausted));
-    assert_eq!(c, before);
+    refuses(&mut c, Refusal::Exhausted, |r| r.join(1));
+    refuses(&mut c, Refusal::Exhausted, |r| r.join(2));
     // What is registered still settles and drains.
     assert_eq!(c.complete(flight), Ok(1));
     assert_eq!(c.poll().map(Notification::waiter), Some(waiter));

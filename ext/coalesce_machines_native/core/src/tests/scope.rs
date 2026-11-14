@@ -1,4 +1,5 @@
 //! Scoped ids: what one coalescer issued names nothing in another.
+use matryona_machines::testing::refuses;
 use periscope_machines::{SEQUENCE_MAX, scope_of, scoped, sequence_of};
 
 use super::*;
@@ -102,12 +103,10 @@ fn repeats_stay_stale_because_nothing_records_how_an_id_ended() {
     let (gone, kept) = (follower(&mut c, 7), follower(&mut c, 7));
     assert_eq!(c.cancel(gone), Ok(()));
     assert_eq!(c.complete(flight), Ok(1));
-    let before = c.clone();
     // Issued here, provably, but the coalescer no longer knows the ending.
-    assert_eq!(c.cancel(gone), Err(Refusal::Stale));
-    assert_eq!(c.complete(flight), Err(Refusal::Stale));
-    assert_eq!(c.abandon(flight), Err(Refusal::Stale));
-    assert_eq!(c, before);
+    refuses(&mut c, Refusal::Stale, |r| r.cancel(gone));
+    refuses(&mut c, Refusal::Stale, |r| r.complete(flight));
+    refuses(&mut c, Refusal::Stale, |r| r.abandon(flight));
     assert_eq!(c.poll().map(Notification::waiter), Some(kept));
     assert_eq!(c.cancel(kept), Err(Refusal::Stale));
 }

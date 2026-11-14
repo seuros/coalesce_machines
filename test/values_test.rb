@@ -108,8 +108,33 @@ class ValuesTest < Minitest::Test
     assert_equal [1, 1], [@flights.in_flight, @flights.waiting]
   end
 
+  # Frozen is checked before any argument is read: a bad argument to a frozen
+  # coalescer is FrozenError, not TypeError or RangeError.
+  def test_a_frozen_coalescer_raises_before_reading_arguments
+    @flights.freeze
+    [-> { @flights.join('9') }, -> { @flights.complete(nil) }, -> { @flights.abandon(0) },
+     -> { @flights.cancel(1.5) }, -> { @flights.drain(10_000) }].each do |call|
+      assert_raises(FrozenError) { call.call }
+    end
+  end
+
   # The classes are pinned at init, so a compaction moves none of them: every
   # path that builds a value still works after it.
+  # The classes are pinned as the extension defined them: the coalescer never
+  # looks one up by name, so a removed constant changes nothing it builds.
+  def test_the_classes_are_pinned_not_looked_up_by_name
+    leader = CoalesceMachines.send(:remove_const, :Leader)
+    assert_instance_of leader, CoalesceMachines::Coalescer.new.join(1)
+  ensure
+    CoalesceMachines.const_set(:Leader, leader)
+  end
+
+  # An outcome outside the core's `Outcome` names every one it accepts.
+  def test_an_unknown_outcome_lists_the_accepted_ones
+    error = assert_raises(RangeError) { CoalesceMachines::Notification.new(2, 1, 9, :done) }
+    assert_equal 'outcome must be one of :completed, :abandoned', error.message
+  end
+
   def test_every_value_path_survives_gc_compact
     skip 'GC.compact is not available' unless GC.respond_to?(:compact)
     GC.compact
