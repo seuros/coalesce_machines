@@ -7,7 +7,7 @@ use std::cell::RefCell;
 
 use coalesce_machines::{Coalescer as Core, FlightId, Notification, Outcome};
 use magnus::{Error, RArray, Ruby, Value, prelude::*, typed_data::Obj};
-use matryona_machines::ruby::{integer, keep, symbol};
+use matryona_machines::ruby::{integer, integer_in, keep, symbol};
 use periscope_machines::scope_of;
 use values::{flight, waiter};
 
@@ -17,19 +17,6 @@ const FLIGHT_CAPACITY: usize = 64;
 /// Waiter slots, and so the most notifications ever queued: the largest
 /// `drain(max)` there is.
 const WAITER_CAPACITY: usize = 256;
-
-/// How many notifications one `drain` may take: an Integer in
-/// `0..=WAITER_CAPACITY`.
-fn room(ruby: &Ruby, max: Value) -> Result<usize, Error> {
-    Some(integer::<usize>(max, "max")?)
-        .filter(|max| *max <= WAITER_CAPACITY)
-        .ok_or_else(|| {
-            Error::new(
-                ruby.exception_range_error(),
-                format!("max must be in 0..={WAITER_CAPACITY}"),
-            )
-        })
-}
 
 /// `CoalesceMachines.scope_of(id)`: the scope an id was issued under.
 fn scope_of_id(raw: Value) -> Result<u16, Error> {
@@ -159,7 +146,7 @@ impl Coalescer {
     /// anything; reads into a Rust buffer on the copy, then builds the values.
     fn drain(ruby: &Ruby, this: Obj<Self>, max: Value) -> Result<RArray, Error> {
         this.check_frozen()?;
-        let room = room(ruby, max)?;
+        let room = integer_in(max, "max", 0..=WAITER_CAPACITY)?;
         let classes = answers::classes(ruby)?;
         keep(
             ruby,

@@ -104,7 +104,11 @@ class CoalescerTest < Minitest::Test
     assert_equal 2, @flights.pending
     # Above what can ever be queued raises, taking nothing.
     capacity = C::Coalescer::WAITER_CAPACITY
-    [capacity + 1, 2**64 - 1].each { |max| assert_raises(RangeError) { @flights.drain(max) } }
+    [capacity + 1, 2**64 - 1, 2**64, -1].each do |max|
+      error = assert_raises(RangeError) { @flights.drain(max) }
+      assert_equal "max must be in 0..=#{capacity}", error.message
+    end
+    assert_raises(TypeError) { @flights.drain(1.0) }
     assert_equal 2, @flights.pending
     assert_equal order.last(2), @flights.drain(capacity).map(&:waiter)
     assert_empty @flights.drain(4)
