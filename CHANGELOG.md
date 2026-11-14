@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0](https://github.com/seuros/coalesce_machines/compare/coalesce_machines/v0.6.0...coalesce_machines/v0.7.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt matryona 0.3 integer_in for drain max
+
+### Features
+
+* adopt matryona 0.3 integer_in for drain max ([a7903e4](https://github.com/seuros/coalesce_machines/commit/a7903e4fe7621e1ca228528ecfa729b39a04f22a))
+
 ## [0.6.0](https://github.com/seuros/coalesce_machines/compare/coalesce_machines/v0.5.0...coalesce_machines/v0.6.0) (2026-11-14)
 
 
