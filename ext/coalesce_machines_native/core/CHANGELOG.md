@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0](https://github.com/seuros/coalesce_machines/compare/coalesce-machines-v0.6.0...coalesce-machines-v0.7.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* seal values, check exact classes natively, clone-then-keep join/poll/drain
+
+### Features
+
+* seal values, check exact classes natively, clone-then-keep join/poll/drain ([19b8261](https://github.com/seuros/coalesce_machines/commit/19b8261e59f48a25eb3444eea2fa674004ae024c))
+
 ## [0.6.0](https://github.com/seuros/coalesce_machines/compare/coalesce-machines-v0.5.0...coalesce-machines-v0.6.0) (2026-11-13)
 
 
