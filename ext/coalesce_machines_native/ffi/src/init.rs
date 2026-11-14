@@ -1,11 +1,16 @@
 //! Private native entry point.
-use crate::{Coalescer, FLIGHT_CAPACITY, WAITER_CAPACITY, scope_of_id};
+use crate::{Coalescer, FLIGHT_CAPACITY, WAITER_CAPACITY, answers, scope_of_id, values};
 use magnus::{Error, Ruby, function, method, prelude::*};
 
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
     let module = ruby.define_module("CoalesceMachines")?;
     module.define_singleton_method("scope_of", function!(scope_of_id, 1))?;
+    answers::define(ruby, module)?;
+    // Private validation hooks of the Data values, made private in Ruby.
+    module.define_singleton_method("__leader", function!(values::leader, 1))?;
+    module.define_singleton_method("__follower", function!(values::follower, 2))?;
+    module.define_singleton_method("__notification", function!(values::notification, 4))?;
     let class = module.define_class("Coalescer", ruby.class_object())?;
     class.undef_default_alloc_func();
     class.const_set("FLIGHT_CAPACITY", FLIGHT_CAPACITY)?;

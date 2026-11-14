@@ -1,9 +1,24 @@
 extern crate std;
 
+use std::assert_matches;
 use std::collections::VecDeque;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::vec::Vec;
 
+use periscope_machines::scoped;
+
 use super::*;
+
+/// A flight id from its raw value; one no coalescer issues (sequence zero)
+/// is the placeholder `FlightId::default()`, which names nothing either.
+fn fid(raw: u64) -> FlightId {
+    FlightId::from_raw(raw).unwrap_or_default()
+}
+
+/// A waiter id from its raw value, as [`fid`].
+fn wid(raw: u64) -> WaiterId {
+    WaiterId::from_raw(raw).unwrap_or_default()
+}
 
 fn leader<const F: usize, const W: usize>(c: &mut Coalescer<F, W>, key: u64) -> FlightId {
     match c.join(key) {
@@ -30,6 +45,22 @@ fn near_the_end<const F: usize, const W: usize>(scope: u16, left: u64) -> Coales
 
 fn drained<const F: usize, const W: usize>(c: &mut Coalescer<F, W>) -> Vec<Notification> {
     core::iter::from_fn(|| c.poll()).collect()
+}
+
+/// Every method that takes an id, handed `raw` in both roles: all refuse, and
+/// the coalescer is left as it was.
+fn names_nothing<const F: usize, const W: usize>(c: &Coalescer<F, W>, raw: u64) {
+    let mut probe = c.clone();
+    assert_eq!(probe.complete(fid(raw)), Err(Refusal::Stale));
+    assert_eq!(probe.abandon(fid(raw)), Err(Refusal::Stale));
+    assert_eq!(probe.cancel(wid(raw)), Err(Refusal::Stale));
+    assert_eq!(probe.followers(fid(raw)), None);
+    assert_eq!(probe, *c, "id {raw:#x} changed the coalescer");
+}
+
+/// A scope for a randomized run: zero, a middling one or the last.
+fn scope_for(seed: u64) -> u16 {
+    [0, 7, u16::MAX][usize::try_from(seed % 3).unwrap_or(0)]
 }
 
 #[test]
@@ -67,20 +98,6 @@ fn followers_share_one_flight_and_are_notified_in_join_order() {
 }
 
 #[test]
-fn a_settled_key_is_not_remembered() {
-    let mut c = Coalescer::<1, 1>::new();
-    let first = leader(&mut c, 7);
-    assert_eq!(c.complete(first), Ok(0));
-    let second = leader(&mut c, 7);
-    assert_ne!(first, second);
-    assert_eq!(c.complete(first), Err(Refusal::Stale));
-    assert_eq!(c.abandon(first), Err(Refusal::Stale));
-    assert_eq!(c.flight(7), Some(second));
-    assert_eq!(c.abandon(second), Ok(0));
-    assert_eq!(c.abandon(second), Err(Refusal::Stale));
-}
-
-#[test]
 fn stale_ids_are_refused_without_touching_reused_slots() {
     let mut c = Coalescer::<1, 1>::new();
     let old_flight = leader(&mut c, 1);
@@ -90,26 +107,19 @@ fn stale_ids_are_refused_without_touching_reused_slots() {
     // Same slots, new generations.
     let flight = leader(&mut c, 2);
     let waiter = follower(&mut c, 2);
-    let before = c.clone();
-    assert_eq!(c.complete(old_flight), Err(Refusal::Stale));
-    assert_eq!(c.abandon(old_flight), Err(Refusal::Stale));
-    assert_eq!(c.cancel(old_waiter), Err(Refusal::Stale));
-    assert_eq!(c.followers(old_flight), None);
-    for raw in [0, u64::MAX, flight.raw() + 100] {
-        assert_eq!(c.complete(FlightId::from_raw(raw)), Err(Refusal::Stale));
-        assert_eq!(c.cancel(WaiterId::from_raw(raw)), Err(Refusal::Stale));
+    // Old generations, never-issued values, and each live id in the other role.
+    for raw in [
+        old_flight.raw(),
+        old_waiter.raw(),
+        0,
+        u64::MAX,
+        flight.raw() + 100,
+    ] {
+        names_nothing(&c, raw);
     }
-    // A flight id is not a waiter id and the reverse.
-    assert_eq!(
-        c.cancel(WaiterId::from_raw(flight.raw())),
-        Err(Refusal::Stale)
-    );
-    assert_eq!(
-        c.complete(FlightId::from_raw(waiter.raw())),
-        Err(Refusal::Stale)
-    );
-    assert_eq!(c, before);
-    assert_eq!(c.complete(FlightId::from_raw(flight.raw())), Ok(1));
+    assert_eq!(c.cancel(wid(flight.raw())), Err(Refusal::Stale));
+    assert_eq!(c.complete(fid(waiter.raw())), Err(Refusal::Stale));
+    assert_eq!(c.complete(flight), Ok(1));
 }
 
 #[test]
@@ -123,13 +133,13 @@ fn abandoned_followers_rejoin_and_one_of_them_leads() {
     assert_eq!(
         notes
             .iter()
-            .map(|n| (n.waiter, n.outcome))
+            .map(|n| (n.waiter(), n.outcome()))
             .collect::<Vec<_>>(),
         [(a, Outcome::Abandoned), (b, Outcome::Abandoned)]
     );
     let retry = leader(&mut c, 9);
     assert_ne!(retry, flight);
-    assert!(matches!(c.join(9), Ok(Joined::Follower { flight, .. }) if flight == retry));
+    assert_matches!(c.join(9), Ok(Joined::Follower { flight, .. }) if flight == retry);
 }
 
 #[test]
@@ -149,23 +159,22 @@ fn cancellation_withdraws_waiting_and_queued_followers() {
     assert_eq!(c.cancel(w[3]), Ok(()));
     assert_eq!(c.pending(), 2);
     assert_eq!(
-        drained(&mut c).iter().map(|n| n.waiter).collect::<Vec<_>>(),
+        drained(&mut c)
+            .into_iter()
+            .map(Notification::waiter)
+            .collect::<Vec<_>>(),
         [w[1], late]
     );
     // Drained: the id is spent.
     assert_eq!(c.cancel(w[1]), Err(Refusal::Stale));
     assert_eq!(c.cancel(late), Err(Refusal::Stale));
     assert_eq!((c.in_flight(), c.waiting(), c.pending()), (0, 0, 0));
-}
 
-#[test]
-fn losing_every_follower_leaves_the_flight_in_the_air() {
-    let mut c = Coalescer::<1, 1>::new();
+    // Losing every follower leaves the flight in the air.
     let flight = leader(&mut c, 1);
     let only = follower(&mut c, 1);
     assert_eq!(c.cancel(only), Ok(()));
-    assert_eq!(c.followers(flight), Some(0));
-    assert_eq!(c.flight(1), Some(flight));
+    assert_eq!((c.followers(flight), c.flight(1)), (Some(0), Some(flight)));
     assert_eq!(c.complete(flight), Ok(0));
     assert_eq!(c.poll(), None);
 }
@@ -192,8 +201,8 @@ fn full_tables_refuse_without_mutation() {
     assert_eq!(c.join(2), Err(Refusal::WaitersFull));
     let again = leader(&mut c, 1);
     assert_eq!(c.join(1), Err(Refusal::WaitersFull));
-    assert_eq!(c.poll().map(|n| n.waiter), Some(a));
-    assert!(matches!(c.join(1), Ok(Joined::Follower { flight, .. }) if flight == again));
+    assert_eq!(c.poll().map(Notification::waiter), Some(a));
+    assert_matches!(c.join(1), Ok(Joined::Follower { flight, .. }) if flight == again);
 }
 
 #[test]
@@ -229,7 +238,7 @@ fn drain_is_bounded_and_resumable_across_flights() {
     let mut out = [Notification::default(); 3];
     assert_eq!(c.drain(&mut out), 3);
     assert_eq!(
-        out.map(|n| (n.waiter, n.flight, n.key, n.outcome)),
+        out.map(|n| (n.waiter(), n.flight(), n.key(), n.outcome())),
         [
             (b, f2, 2, Outcome::Abandoned),
             (fourth, f2, 2, Outcome::Abandoned),
@@ -244,14 +253,14 @@ fn drain_is_bounded_and_resumable_across_flights() {
     assert_eq!(c.complete(f3), Ok(1));
 
     let untouched = Notification {
-        waiter: WaiterId::from_raw(99),
-        flight: FlightId::from_raw(98),
+        waiter: wid(99),
+        flight: fid(98),
         key: 97,
         outcome: Outcome::Completed,
     };
     let mut out = [untouched; 3];
     assert_eq!(c.drain(&mut out), 2);
-    assert_eq!((out[0].waiter, out[1].waiter), (third, fifth));
+    assert_eq!((out[0].waiter(), out[1].waiter()), (third, fifth));
     // Untouched past the count.
     assert_eq!(out[2], untouched);
     let before = out;
@@ -263,13 +272,21 @@ fn drain_is_bounded_and_resumable_across_flights() {
 fn defaults_are_placeholders_the_coalescer_never_emits() {
     let blank = Notification::default();
     assert_eq!(
-        (blank.waiter.raw(), blank.flight.raw(), blank.key),
+        (blank.waiter().raw(), blank.flight().raw(), blank.key()),
         (0, 0, 0)
     );
-    assert_eq!(blank.outcome, Outcome::default());
-    assert_eq!(Outcome::default(), Outcome::Abandoned);
-    assert_eq!(FlightId::default(), FlightId::from_raw(0));
-    assert_eq!(WaiterId::default(), WaiterId::from_raw(0));
+    assert_eq!(
+        (blank.outcome(), Outcome::default()),
+        (Outcome::Abandoned, Outcome::Abandoned)
+    );
+    // `from_raw` builds no placeholder: sequence zero is no id, in any scope.
+    for raw in [0, scoped(5, 0)] {
+        assert_eq!(
+            (FlightId::from_raw(raw), WaiterId::from_raw(raw)),
+            (None, None)
+        );
+    }
+    assert_eq!(FlightId::from_raw(1).map(FlightId::raw), Some(1));
 
     // Raw zero is never issued, in any scope, so a placeholder names nothing.
     let mut c = Coalescer::<1, 1>::new();
@@ -277,12 +294,7 @@ fn defaults_are_placeholders_the_coalescer_never_emits() {
     let waiter = follower(&mut c, 0);
     assert_ne!(flight, FlightId::default());
     assert_ne!(waiter, WaiterId::default());
-    let before = c.clone();
-    assert_eq!(c.complete(FlightId::default()), Err(Refusal::Stale));
-    assert_eq!(c.abandon(FlightId::default()), Err(Refusal::Stale));
-    assert_eq!(c.cancel(WaiterId::default()), Err(Refusal::Stale));
-    assert_eq!(c.followers(FlightId::default()), None);
-    assert_eq!(c, before);
+    names_nothing(&c, 0);
     assert_eq!(c.abandon(flight), Ok(1));
     assert_ne!(c.poll(), Some(blank));
 }
@@ -319,7 +331,7 @@ fn key_and_id_limits() {
     assert_eq!(c, before);
     // What is registered still settles and drains.
     assert_eq!(c.complete(flight), Ok(1));
-    assert_eq!(c.poll().map(|n| n.waiter), Some(waiter));
+    assert_eq!(c.poll().map(Notification::waiter), Some(waiter));
     assert_eq!(c.join(1), Err(Refusal::Exhausted));
 }
 
@@ -334,6 +346,26 @@ fn refusals_describe_themselves() {
     ] {
         assert_ne!(refusal.to_string(), "");
     }
+}
+
+#[test]
+fn regression_a_broken_chain_stops_settle_before_the_flight_is_taken() {
+    let mut c = Coalescer::<1, 2>::new();
+    let flight = leader(&mut c, 7);
+    let _kept = follower(&mut c, 7);
+    let _lost = follower(&mut c, 7);
+    // Break the invariant by hand: a linked follower's slot holds nothing.
+    c.waiters[1] = None;
+    let before = c.clone();
+    // Debug builds stop at the invariant; release builds refuse. Either way
+    // the flight is still in the air and nothing changed.
+    match catch_unwind(AssertUnwindSafe(|| c.complete(flight))) {
+        Ok(answer) => assert_eq!(answer, Err(Refusal::Stale)),
+        Err(_) if cfg!(debug_assertions) => {}
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+    assert_eq!(c, before);
+    assert_eq!(c.flight(7), Some(flight));
 }
 
 mod model;

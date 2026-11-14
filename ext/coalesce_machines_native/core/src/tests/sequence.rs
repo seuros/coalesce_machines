@@ -14,17 +14,6 @@ fn reserved<const F: usize, const W: usize>(c: &mut Coalescer<F, W>) -> u64 {
     }
 }
 
-/// Every method that takes an id, handed `raw` in both roles: all refuse, and
-/// the coalescer is left as it was.
-fn names_nothing<const F: usize, const W: usize>(c: &Coalescer<F, W>, raw: u64) {
-    let mut probe = c.clone();
-    assert_eq!(probe.complete(FlightId::from_raw(raw)), Err(Refusal::Stale));
-    assert_eq!(probe.abandon(FlightId::from_raw(raw)), Err(Refusal::Stale));
-    assert_eq!(probe.cancel(WaiterId::from_raw(raw)), Err(Refusal::Stale));
-    assert_eq!(probe.followers(FlightId::from_raw(raw)), None);
-    assert_eq!(probe, *c, "id {raw:#x} changed the coalescer");
-}
-
 #[test]
 fn reserved_ids_interleave_with_flight_and_waiter_ids() {
     let mut c = Coalescer::<2, 2>::with_scope(3);
@@ -54,9 +43,9 @@ fn a_reserved_id_is_refused_by_every_method_forever() {
     names_nothing(&c, mine);
     // Still so once the slots around it were settled, drained and reused.
     assert_eq!(c.complete(flight), Ok(1));
-    assert_eq!(c.poll().map(|note| note.waiter), Some(waiter));
+    assert_eq!(c.poll().map(Notification::waiter), Some(waiter));
     let again = leader(&mut c, 7);
-    let _ = follower(&mut c, 7);
+    follower(&mut c, 7);
     assert_ne!(again.raw(), mine);
     names_nothing(&c, mine);
 }
@@ -81,7 +70,7 @@ fn owns_proves_origin_for_every_kind_and_nothing_else() {
 #[test]
 fn no_id_of_any_kind_repeats_across_join_and_reserve() {
     for seed in 0..16 {
-        let scope = [0, 9, u16::MAX][usize::try_from(seed % 3).unwrap_or(0)];
+        let scope = scope_for(seed);
         let mut draws = Draws(seed);
         let mut c = Coalescer::<3, 4>::with_scope(scope);
         let mut seen = BTreeSet::new();
@@ -95,7 +84,10 @@ fn no_id_of_any_kind_repeats_across_join_and_reserve() {
                         Some(flight.raw())
                     }
                     Ok(Joined::Follower { waiter, .. }) => Some(waiter.raw()),
-                    Err(_) => None,
+                    Err(refusal) => {
+                        assert_matches!(refusal, Refusal::FlightsFull | Refusal::WaitersFull);
+                        None
+                    }
                 },
                 2 | 3 => {
                     let id = reserved(&mut c);
@@ -109,7 +101,7 @@ fn no_id_of_any_kind_repeats_across_join_and_reserve() {
                     None
                 }
                 _ => {
-                    let _ = c.poll();
+                    c.poll();
                     None
                 }
             };

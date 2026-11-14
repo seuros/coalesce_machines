@@ -9,13 +9,17 @@ module CoalesceMachines
   # route an id to the coalescer that issued it.
   def self.scope_of: (Integer id) -> Integer
 
-  # Ids are Integers: flight ids and waiter ids, as issued by `join`.
+  # Ids are Integers: flight ids and waiter ids, as issued by `join`. Every
+  # value validates at construction through the core: TypeError for a
+  # non-Integer, RangeError for an id outside 1..2**64-1 or whose sequence
+  # number (low 48 bits) is zero.
   class Leader < Data
     attr_reader flight: Integer
     def self.new: (Integer flight) -> Leader
                 | (flight: Integer) -> Leader
   end
 
+  # RangeError unless `waiter` is of the flight's scope and issued after it.
   class Follower < Data
     attr_reader waiter: Integer
     attr_reader flight: Integer
@@ -23,6 +27,9 @@ module CoalesceMachines
                 | (waiter: Integer, flight: Integer) -> Follower
   end
 
+  # The ids are held to the Follower rule; `key` is an Integer in
+  # 0..2**64-1; `outcome` a Symbol (TypeError otherwise), :completed or
+  # :abandoned (RangeError otherwise).
   class Notification < Data
     type outcome = :completed | :abandoned
 
@@ -34,6 +41,8 @@ module CoalesceMachines
                 | (waiter: Integer, flight: Integer, key: Integer, outcome: outcome) -> Notification
   end
 
+  # A method taking a flight or waiter id raises RangeError for one whose
+  # sequence number is zero: no coalescer issues it.
   class Coalescer
     FLIGHT_CAPACITY: Integer
     WAITER_CAPACITY: Integer
@@ -43,8 +52,8 @@ module CoalesceMachines
     # `scope` is an Integer in 0..65_535, carried in the top 16 bits of every id.
     def self.with_scope: (Integer scope) -> Coalescer
     # Nothing in flight, the id sequence continuing after `issued` (a saved
-    # `#issued`): the constructor for a restart. nil when `issued` is beyond
-    # the sequence (more than 2**48 - 1).
+    # `#issued`): the constructor for a restart. RangeError when `issued` is
+    # beyond the sequence (more than 2**48 - 1).
     def self.resumed: (Integer scope, Integer issued) -> Coalescer
     def scope: () -> Integer
     # Ids issued so far, of every kind: the count to save for `resumed`.
@@ -67,6 +76,8 @@ module CoalesceMachines
     # The oldest queued notification, or nil when nothing is queued. Never refuses.
     def poll: () -> Notification?
     # At most `max` queued notifications, oldest first. Never refuses.
+    # RangeError for `max` above WAITER_CAPACITY (more than is ever queued),
+    # raised before anything is taken.
     def drain: (Integer max) -> Array[Notification]
     def flight: (Integer key) -> Integer?
     def followers: (Integer flight) -> Integer?

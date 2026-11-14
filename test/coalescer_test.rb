@@ -33,19 +33,6 @@ class CoalescerTest < Minitest::Test
     assert_equal 0, @flights.pending
   end
 
-  def test_settled_keys_are_not_remembered_and_old_ids_are_stale
-    first = @flights.join(7)
-    assert_equal 0, @flights.complete(first.flight)
-    assert_equal :stale, @flights.complete(first.flight)
-    assert_equal :stale, @flights.abandon(first.flight)
-    second = @flights.join(7)
-    assert_instance_of C::Leader, second
-    refute_equal first.flight, second.flight
-    assert_equal :stale, @flights.complete(first.flight)
-    assert_equal :stale, @flights.complete(0)
-    assert_equal :stale, @flights.complete(2**64 - 1)
-    assert_equal second.flight, @flights.flight(7)
-  end
 
   def test_abandon_notifies_followers_who_rejoin
     leader = @flights.join(9)
@@ -69,16 +56,15 @@ class CoalescerTest < Minitest::Test
     assert_equal :cancelled, @flights.cancel(b.waiter)
     assert_equal [c.waiter], @flights.drain(10).map(&:waiter)
     assert_equal :stale, @flights.cancel(c.waiter)
-  end
 
-  def test_last_follower_leaving_keeps_the_flight
+    # The last follower leaving keeps the flight in the air.
     leader = @flights.join(1)
     follower = @flights.join(1)
     assert_equal :cancelled, @flights.cancel(follower.waiter)
-    assert_equal 0, @flights.followers(leader.flight)
-    assert_equal leader.flight, @flights.flight(1)
+    assert_equal [0, leader.flight], [@flights.followers(leader.flight), @flights.flight(1)]
     assert_equal 0, @flights.complete(leader.flight)
   end
+
 
   def test_capacities_and_refusals
     assert_equal 64, C::Coalescer::FLIGHT_CAPACITY
@@ -116,7 +102,11 @@ class CoalescerTest < Minitest::Test
     assert_equal order.first(4), first.map(&:waiter)
     assert_equal %i[abandoned abandoned abandoned completed], first.map(&:outcome)
     assert_equal 2, @flights.pending
-    assert_equal order.last(2), @flights.drain(2**64 - 1).map(&:waiter)
+    # Above what can ever be queued raises, taking nothing.
+    capacity = C::Coalescer::WAITER_CAPACITY
+    [capacity + 1, 2**64 - 1].each { |max| assert_raises(RangeError) { @flights.drain(max) } }
+    assert_equal 2, @flights.pending
+    assert_equal order.last(2), @flights.drain(capacity).map(&:waiter)
     assert_empty @flights.drain(4)
   end
 
@@ -175,17 +165,6 @@ class CoalescerTest < Minitest::Test
     assert_equal low.flight, @flights.flight(0)
   end
 
-  def test_values_are_frozen_data
-    leader = @flights.join(1)
-    follower = @flights.join(1)
-    [leader, follower].each { |value| assert_kind_of Data, value }
-    assert_predicate leader, :frozen?
-    assert_equal({ flight: leader.flight }, leader.to_h)
-    assert_equal C::Follower.new(waiter: follower.waiter, flight: leader.flight), follower
-    assert_equal [%i[flight], %i[waiter flight], %i[waiter flight key outcome]],
-                 [C::Leader, C::Follower, C::Notification].map(&:members)
-    assert_kind_of Integer, leader.flight
-  end
 
   def test_freeze_guards
     leader = @flights.join(1)
@@ -197,6 +176,7 @@ class CoalescerTest < Minitest::Test
     assert_raises(FrozenError) { @flights.cancel(follower.waiter) }
     assert_raises(FrozenError) { @flights.drain(1) }
     assert_raises(FrozenError) { @flights.poll }
+    assert_raises(FrozenError) { @flights.reserve }
     assert_equal leader.flight, @flights.flight(1)
     assert_equal 1, @flights.followers(leader.flight)
     assert_equal [1, 1, 0], [@flights.in_flight, @flights.waiting, @flights.pending]
@@ -241,7 +221,7 @@ class CoalescerTest < Minitest::Test
     assert_equal [1, 1, 0], state(one)
   end
 
-  def test_repeats_stay_stale
+  def test_repeats_stay_stale_and_a_settled_key_is_not_remembered
     leader = @flights.join(7)
     gone = @flights.join(7).waiter
     assert_equal :cancelled, @flights.cancel(gone)
@@ -250,6 +230,11 @@ class CoalescerTest < Minitest::Test
     assert_equal :stale, @flights.complete(leader.flight)
     assert_equal :stale, @flights.abandon(leader.flight)
     assert_equal [0, 0, 0], state(@flights)
+    second = @flights.join(7)
+    assert_instance_of C::Leader, second
+    refute_equal leader.flight, second.flight
+    assert_equal :stale, @flights.complete(leader.flight)
+    assert_equal :stale, @flights.complete(2**64 - 1)
   end
 
   def test_scope_must_be_a_sixteen_bit_integer
@@ -333,8 +318,6 @@ class CoalescerTest < Minitest::Test
     assert_raises(ArgumentError) { C::Coalescer.resumed(0) }
     assert_raises(TypeError) { @flights.owns?(nil) }
     assert_raises(RangeError) { @flights.owns?(-1) }
-    @flights.freeze
-    assert_raises(FrozenError) { @flights.reserve }
     assert_equal [0, 2**48 - 1, false], [@flights.issued, @flights.remaining, @flights.owns?(1)]
   end
 

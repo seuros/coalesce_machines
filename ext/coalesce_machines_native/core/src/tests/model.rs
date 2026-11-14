@@ -190,12 +190,7 @@ fn run_against_model<const F: usize, const W: usize>(
         if foreign {
             foreign_ids += 1;
             // Whatever the step did, the foreign id itself reaches nothing.
-            let mut probe = before.clone();
-            assert_eq!(probe.complete(FlightId(id)), Err(Refusal::Stale));
-            assert_eq!(probe.abandon(FlightId(id)), Err(Refusal::Stale));
-            assert_eq!(probe.cancel(WaiterId(id)), Err(Refusal::Stale));
-            assert_eq!(probe.followers(FlightId(id)), None);
-            assert_eq!(probe, before, "a foreign id mutated state");
+            names_nothing(&before, id);
         }
         if refused {
             refusals += 1;
@@ -211,9 +206,7 @@ fn run_against_model<const F: usize, const W: usize>(
 #[test]
 fn randomized_operations_match_the_naive_model() {
     for seed in 0..24 {
-        // Scope zero, a middling scope and the last one.
-        let scope = [0, 7, u16::MAX][usize::try_from(seed % 3).unwrap_or(0)];
-        run_against_model::<3, 5>(scope, seed, 5, 1_500);
+        run_against_model::<3, 5>(scope_for(seed), seed, 5, 1_500);
     }
     // Tight tables: capacity refusals dominate.
     for seed in 100..112 {

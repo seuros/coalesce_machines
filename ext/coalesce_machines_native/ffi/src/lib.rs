@@ -1,28 +1,39 @@
 //! Thin binding to the bounded in-flight coalescer.
+mod answers;
 mod init;
+mod values;
 
 use std::cell::RefCell;
 
-use coalesce_machines::{
-    Coalescer as Core, FlightId, Joined, Notification, Outcome, Refusal, WaiterId,
-};
+use coalesce_machines::{Coalescer as Core, FlightId, Notification, Outcome};
 use magnus::{Error, Integer, RArray, Ruby, TryConvert, Value, prelude::*, typed_data::Obj};
 use periscope_machines::scope_of;
+use values::{Flight, Waiter};
+
+use answers::answer;
 
 const FLIGHT_CAPACITY: usize = 64;
+/// Waiter slots, and so the most notifications ever queued: the largest
+/// `drain(max)` there is.
 const WAITER_CAPACITY: usize = 256;
+
+/// `TypeError` unless `value` is an Integer.
+fn integer(value: Value, message: &'static str) -> Result<(), Error> {
+    if Integer::from_value(value).is_some() {
+        return Ok(());
+    }
+    Err(Error::new(
+        Ruby::get_with(value).exception_type_error(),
+        message,
+    ))
+}
 
 #[derive(Clone, Copy)]
 struct Number(u64);
 
 impl TryConvert for Number {
     fn try_convert(value: Value) -> Result<Self, Error> {
-        if Integer::from_value(value).is_none() {
-            return Err(Error::new(
-                Ruby::get_with(value).exception_type_error(),
-                "expected an Integer (unsigned 64-bit)",
-            ));
-        }
+        integer(value, "expected an Integer (unsigned 64-bit)")?;
         u64::try_convert(value).map(Self)
     }
 }
@@ -33,43 +44,35 @@ struct Scope(u16);
 
 impl TryConvert for Scope {
     fn try_convert(value: Value) -> Result<Self, Error> {
-        let ruby = Ruby::get_with(value);
-        if Integer::from_value(value).is_none() {
-            return Err(Error::new(
-                ruby.exception_type_error(),
-                "scope must be an Integer",
-            ));
-        }
-        u16::try_convert(value)
-            .map(Self)
-            .map_err(|_| Error::new(ruby.exception_range_error(), "scope must be in 0..=65535"))
+        integer(value, "scope must be an Integer")?;
+        u16::try_convert(value).map(Self).map_err(|_| {
+            Error::new(
+                Ruby::get_with(value).exception_range_error(),
+                "scope must be in 0..=65535",
+            )
+        })
     }
 }
 
-/// Ruby symbol of a refusal: the snake case of the core variant.
-fn refusal(ruby: &Ruby, refused: Refusal) -> Value {
-    ruby.to_symbol(match refused {
-        Refusal::FlightsFull => "flights_full",
-        Refusal::WaitersFull => "waiters_full",
-        Refusal::Exhausted => "exhausted",
-        Refusal::Stale => "stale",
-    })
-    .as_value()
-}
+/// How many notifications one `drain` may take: an Integer in
+/// `0..=WAITER_CAPACITY`.
+#[derive(Clone, Copy)]
+struct Room(usize);
 
-fn data(ruby: &Ruby, name: &str) -> Result<Value, Error> {
-    ruby.define_module("CoalesceMachines")?.const_get(name)
-}
-
-fn notification(ruby: &Ruby, class: Value, note: Notification) -> Result<Value, Error> {
-    let outcome = ruby.to_symbol(match note.outcome {
-        Outcome::Completed => "completed",
-        Outcome::Abandoned => "abandoned",
-    });
-    class.funcall(
-        "new",
-        (note.waiter.raw(), note.flight.raw(), note.key, outcome),
-    )
+impl TryConvert for Room {
+    fn try_convert(value: Value) -> Result<Self, Error> {
+        let max = Number::try_convert(value)?.0;
+        usize::try_from(max)
+            .ok()
+            .filter(|max| *max <= WAITER_CAPACITY)
+            .map(Self)
+            .ok_or_else(|| {
+                Error::new(
+                    Ruby::get_with(value).exception_range_error(),
+                    format!("max must be in 0..={WAITER_CAPACITY}"),
+                )
+            })
+    }
 }
 
 /// `CoalesceMachines.scope_of(id)`: the scope an id was issued under.
@@ -77,9 +80,11 @@ const fn scope_of_id(raw: Number) -> u16 {
     scope_of(raw.0)
 }
 
+type CoreType = Core<FLIGHT_CAPACITY, WAITER_CAPACITY>;
+
 #[magnus::wrap(class = "CoalesceMachines::Coalescer", free_immediately, size)]
 struct Coalescer {
-    core: RefCell<Core<FLIGHT_CAPACITY, WAITER_CAPACITY>>,
+    core: RefCell<CoreType>,
 }
 
 impl Coalescer {
@@ -128,85 +133,111 @@ impl Coalescer {
     fn reserve(ruby: &Ruby, this: Obj<Self>) -> Result<Value, Error> {
         this.check_frozen()?;
         let reserved = this.core.borrow_mut().reserve();
-        Ok(match reserved {
-            Ok(id) => ruby.integer_from_u64(id).as_value(),
-            Err(refused) => refusal(ruby, refused),
+        answer(ruby, reserved, |id| {
+            Ok(ruby.integer_from_u64(id).as_value())
         })
     }
 
     fn join(ruby: &Ruby, this: Obj<Self>, key: Number) -> Result<Value, Error> {
         this.check_frozen()?;
-        let joined = this.core.borrow_mut().join(key.0);
-        match joined {
-            Ok(Joined::Leader(flight)) => data(ruby, "Leader")?.funcall("new", (flight.raw(),)),
-            Ok(Joined::Follower { waiter, flight }) => {
-                data(ruby, "Follower")?.funcall("new", (waiter.raw(), flight.raw()))
-            }
-            Err(refused) => Ok(refusal(ruby, refused)),
-        }
+        let classes = answers::classes(ruby)?;
+        Self::on_copy(ruby, this, |core| {
+            answer(ruby, core.join(key.0), |role| classes.joined(ruby, role))
+        })
     }
 
-    fn settled(ruby: &Ruby, outcome: Result<usize, Refusal>) -> Value {
-        match outcome {
-            Ok(notified) => ruby.integer_from_u64(notified as u64).as_value(),
-            Err(refused) => refusal(ruby, refused),
-        }
-    }
-
-    fn complete(ruby: &Ruby, this: Obj<Self>, flight: Number) -> Result<Value, Error> {
+    fn settle(
+        ruby: &Ruby,
+        this: Obj<Self>,
+        flight: Flight,
+        ending: Outcome,
+    ) -> Result<Value, Error> {
         this.check_frozen()?;
-        let outcome = this
-            .core
-            .borrow_mut()
-            .complete(FlightId::from_raw(flight.0));
-        Ok(Self::settled(ruby, outcome))
+        let mut core = this.core.borrow_mut();
+        let settled = match ending {
+            Outcome::Completed => core.complete(flight.0),
+            Outcome::Abandoned => core.abandon(flight.0),
+        };
+        answer(ruby, settled, |notified| {
+            Ok(ruby.integer_from_u64(notified as u64).as_value())
+        })
     }
 
-    fn abandon(ruby: &Ruby, this: Obj<Self>, flight: Number) -> Result<Value, Error> {
-        this.check_frozen()?;
-        let outcome = this.core.borrow_mut().abandon(FlightId::from_raw(flight.0));
-        Ok(Self::settled(ruby, outcome))
+    fn complete(ruby: &Ruby, this: Obj<Self>, flight: Flight) -> Result<Value, Error> {
+        Self::settle(ruby, this, flight, Outcome::Completed)
     }
 
-    fn cancel(ruby: &Ruby, this: Obj<Self>, waiter: Number) -> Result<Value, Error> {
+    fn abandon(ruby: &Ruby, this: Obj<Self>, flight: Flight) -> Result<Value, Error> {
+        Self::settle(ruby, this, flight, Outcome::Abandoned)
+    }
+
+    fn cancel(ruby: &Ruby, this: Obj<Self>, waiter: Waiter) -> Result<Value, Error> {
         this.check_frozen()?;
-        let outcome = this.core.borrow_mut().cancel(WaiterId::from_raw(waiter.0));
-        Ok(match outcome {
-            Ok(()) => ruby.to_symbol("cancelled").as_value(),
-            Err(refused) => refusal(ruby, refused),
+        let cancelled = this.core.borrow_mut().cancel(waiter.0);
+        answer(ruby, cancelled, |()| {
+            Ok(ruby.to_symbol("cancelled").as_value())
         })
     }
 
     fn poll(ruby: &Ruby, this: Obj<Self>) -> Result<Option<Value>, Error> {
         this.check_frozen()?;
-        // Resolve the class before taking anything, so a failure loses nothing.
-        let class = data(ruby, "Notification")?;
-        let polled = this.core.borrow_mut().poll();
-        polled
-            .map(|note| notification(ruby, class, note))
-            .transpose()
+        let classes = answers::classes(ruby)?;
+        Self::on_copy(ruby, this, |core| {
+            core.poll()
+                .map(|note| classes.notification(ruby, &note))
+                .transpose()
+        })
     }
 
-    fn drain(ruby: &Ruby, this: Obj<Self>, max: Number) -> Result<RArray, Error> {
+    /// Raises `RangeError` for `max` above `WAITER_CAPACITY`, before taking
+    /// anything; reads into a Rust buffer, then builds the values.
+    fn drain(ruby: &Ruby, this: Obj<Self>, max: Room) -> Result<RArray, Error> {
         this.check_frozen()?;
-        // Resolve the class before taking anything, so a failure loses nothing.
-        let class = data(ruby, "Notification")?;
-        let room = usize::try_from(max.0).map_or(WAITER_CAPACITY, |max| max.min(WAITER_CAPACITY));
-        let mut buffer = [Notification::default(); WAITER_CAPACITY];
-        let written = this.core.borrow_mut().drain(&mut buffer[..room]);
-        let notifications = ruby.ary_new_capa(written);
-        for note in buffer.iter().take(written) {
-            notifications.push(notification(ruby, class, *note)?)?;
+        let classes = answers::classes(ruby)?;
+        Self::on_copy(ruby, this, |core| {
+            let mut buffer = [Notification::default(); WAITER_CAPACITY];
+            let written = core.drain(&mut buffer[..max.0]);
+            let notifications = ruby.ary_new_capa(written);
+            for note in buffer.iter().take(written) {
+                notifications.push(classes.notification(ruby, note)?)?;
+            }
+            Ok(notifications)
+        })
+    }
+
+    /// Runs `act`, which builds a Ruby answer, on a copy of the coalescer and
+    /// keeps the copy only once the answer exists. The answers are built
+    /// without running Ruby code, so nothing should get in between; the
+    /// receiver is still checked right before the store: frozen meanwhile
+    /// raises `FrozenError`, changed meanwhile `RuntimeError`, and in both
+    /// cases nothing is applied. No borrow is held while `act` runs.
+    fn on_copy<R>(
+        ruby: &Ruby,
+        this: Obj<Self>,
+        act: impl FnOnce(&mut CoreType) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        this.check_frozen()?;
+        let before = this.core.borrow().clone();
+        let mut after = before.clone();
+        let answer = act(&mut after)?;
+        this.check_frozen()?;
+        let mut held = this.core.borrow_mut();
+        if *held != before {
+            return Err(Error::new(
+                ruby.exception_runtime_error(),
+                "the coalescer changed while the answer was built; the call was not applied",
+            ));
         }
-        Ok(notifications)
+        *held = after;
+        Ok(answer)
     }
 
     fn flight(&self, key: Number) -> Option<u64> {
         self.core.borrow().flight(key.0).map(FlightId::raw)
     }
 
-    fn followers(&self, flight: Number) -> Option<usize> {
-        self.core.borrow().followers(FlightId::from_raw(flight.0))
+    fn followers(&self, flight: Flight) -> Option<usize> {
+        self.core.borrow().followers(flight.0)
     }
 
     fn in_flight(&self) -> usize {

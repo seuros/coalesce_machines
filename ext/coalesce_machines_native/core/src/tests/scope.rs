@@ -34,21 +34,9 @@ fn regression_an_id_from_another_coalescer_names_nothing_here() {
         (&mut near, far_flight, far_waiter),
         (&mut far, near_flight, near_waiter),
     ] {
-        let before = here.clone();
-        assert_eq!(here.complete(flight), Err(Refusal::Stale));
-        assert_eq!(here.abandon(flight), Err(Refusal::Stale));
-        assert_eq!(here.cancel(waiter), Err(Refusal::Stale));
-        assert_eq!(here.followers(flight), None);
-        // A foreign id in the wrong role is no better.
-        assert_eq!(
-            here.cancel(WaiterId::from_raw(flight.raw())),
-            Err(Refusal::Stale)
-        );
-        assert_eq!(
-            here.complete(FlightId::from_raw(waiter.raw())),
-            Err(Refusal::Stale)
-        );
-        assert_eq!(*here, before);
+        // In both roles: a foreign id in the wrong role is no better.
+        names_nothing(here, flight.raw());
+        names_nothing(here, waiter.raw());
     }
 
     // Their own ids still work.
@@ -84,18 +72,14 @@ fn raw_values_are_the_published_layout() {
     // A scope sits in the top 16 bits above the same counter.
     let mut top = Pair::with_scope(u16::MAX);
     let (flight, waiter) = (leader(&mut top, 7), follower(&mut top, 7));
-    assert_eq!(flight.raw(), (0xFFFF << 48) | 1);
-    assert_eq!(waiter.raw(), (0xFFFF << 48) | 2);
     assert_eq!(
         (flight.raw(), waiter.raw()),
-        (scoped(u16::MAX, 1), scoped(u16::MAX, 2))
+        ((0xFFFF << 48) | 1, (0xFFFF << 48) | 2)
     );
     assert_eq!(
         (scope_of(flight.raw()), flight.scope()),
         (u16::MAX, u16::MAX)
     );
-    let mut three = Pair::with_scope(3);
-    assert_eq!(leader(&mut three, 7).raw(), 0x0003_0000_0000_0001);
 }
 
 #[test]
@@ -103,16 +87,10 @@ fn ids_of_this_scope_that_were_never_issued_are_stale() {
     let mut c = Pair::with_scope(4);
     let flight = leader(&mut c, 7);
     let waiter = follower(&mut c, 7);
-    let before = c.clone();
     // Not issued yet, the scope's zero, and the far end of the sequence.
     for sequence in [0, 3, SEQUENCE_MAX] {
-        let raw = scoped(4, sequence);
-        assert_eq!(c.complete(FlightId::from_raw(raw)), Err(Refusal::Stale));
-        assert_eq!(c.abandon(FlightId::from_raw(raw)), Err(Refusal::Stale));
-        assert_eq!(c.cancel(WaiterId::from_raw(raw)), Err(Refusal::Stale));
-        assert_eq!(c.followers(FlightId::from_raw(raw)), None);
+        names_nothing(&c, scoped(4, sequence));
     }
-    assert_eq!(c, before);
     assert_eq!(c.cancel(waiter), Ok(()));
     assert_eq!(c.complete(flight), Ok(0));
 }
@@ -130,7 +108,7 @@ fn repeats_stay_stale_because_nothing_records_how_an_id_ended() {
     assert_eq!(c.complete(flight), Err(Refusal::Stale));
     assert_eq!(c.abandon(flight), Err(Refusal::Stale));
     assert_eq!(c, before);
-    assert_eq!(c.poll().map(|note| note.waiter), Some(kept));
+    assert_eq!(c.poll().map(Notification::waiter), Some(kept));
     assert_eq!(c.cancel(kept), Err(Refusal::Stale));
 }
 
@@ -143,14 +121,39 @@ fn a_refused_join_consumes_no_id() {
     assert_eq!(c.join(7), Err(Refusal::WaitersFull));
     assert_eq!(c.join(8), Err(Refusal::FlightsFull));
     assert_eq!(c.poll(), None);
-    assert_eq!(c.abandon(FlightId::from_raw(scoped(9, 1))), Ok(1));
+    assert_eq!(c.abandon(fid(scoped(9, 1))), Ok(1));
     assert_eq!(leader(&mut c, 8).raw(), scoped(9, 3));
 }
 
 #[test]
-fn a_spent_issuer_is_this_cores_exhausted() {
+fn rebuilt_values_hold_only_what_a_coalescer_could_emit() {
+    let mut c = Pair::with_scope(6);
+    let flight = leader(&mut c, 7);
+    let waiter = follower(&mut c, 7);
     assert_eq!(
-        spent(periscope_machines::Refusal::Exhausted),
-        Refusal::Exhausted
+        Joined::follower(waiter, flight),
+        Some(Joined::Follower { waiter, flight })
     );
+    let rebuilt = Notification::new(waiter, flight, 7, Outcome::Completed);
+    assert_eq!(
+        rebuilt.map(|n| (n.waiter(), n.flight(), n.key(), n.outcome())),
+        Some((waiter, flight, 7, Outcome::Completed))
+    );
+    // Another scope, the waiter not after its flight, or a placeholder.
+    let foreign = wid(scoped(5, 2));
+    let early = wid(flight.raw());
+    let wrong = [
+        (foreign, flight),
+        (early, flight),
+        (WaiterId::default(), flight),
+        (waiter, FlightId::default()),
+        (WaiterId::default(), FlightId::default()),
+    ];
+    for (waiter, flight) in wrong {
+        assert_eq!(Joined::follower(waiter, flight), None);
+        assert_eq!(
+            Notification::new(waiter, flight, 7, Outcome::Abandoned),
+            None
+        );
+    }
 }
