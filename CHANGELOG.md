@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.3](https://github.com/seuros/coalesce_machines/compare/coalesce_machines/v0.7.2...coalesce_machines/v0.7.3) (2026-11-16)
+
+
+### Bug Fixes
+
+* fix wrapped classes at load so building a value runs no Ruby ([d3cae71](https://github.com/seuros/coalesce_machines/commit/d3cae718521645f6d756bbdec3571ebe665815b7))
+
 ## [0.7.2](https://github.com/seuros/coalesce_machines/compare/coalesce_machines/v0.7.1...coalesce_machines/v0.7.2) (2026-11-16)
 
 
