@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/seuros/coalesce_machines/compare/coalesce_machines/v0.7.1...coalesce_machines/v0.7.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* index-free coalescer core, rebuilt on matryona 0.5 ([9483041](https://github.com/seuros/coalesce_machines/commit/9483041ccab0502d65b8a30fa223e55725983e44))
+
 ## [0.7.1](https://github.com/seuros/coalesce_machines/compare/coalesce_machines/v0.7.0...coalesce_machines/v0.7.1) (2026-11-14)
 
 
