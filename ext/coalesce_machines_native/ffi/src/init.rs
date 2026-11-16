@@ -1,6 +1,7 @@
 //! Private native entry point.
 use crate::{Coalescer, FLIGHT_CAPACITY, WAITER_CAPACITY, answers, scope_of_id, values};
 use magnus::{Error, Ruby, function, method, prelude::*};
+use matryona_machines::ruby::Class;
 
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
@@ -36,5 +37,6 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("pending", method!(Coalescer::pending, 0))?;
     class.define_method("flight_capacity", function!(Coalescer::flight_capacity, 0))?;
     class.define_method("waiter_capacity", function!(Coalescer::waiter_capacity, 0))?;
-    Ok(())
+    // Fix magnus's class for Coalescer now: building one later runs no Ruby.
+    Class::pin_wrapped::<Coalescer>(ruby, class).map(drop)
 }
