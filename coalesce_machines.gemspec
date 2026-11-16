@@ -6,8 +6,8 @@ Gem::Specification.new do |spec|
   spec.version = CoalesceMachines::VERSION
   spec.authors = ['Abdelkader Boudih']
   spec.email = ['oss@seuros.com']
-  spec.summary = 'Initial bounded in-flight coalescing policy with a native Rust core'
-  spec.description = 'Local unstable leader/follower in-flight registry; emits notification ids, ' \
+  spec.summary = 'Bounded in-flight coalescing policy with a native Rust core'
+  spec.description = 'Leader/follower in-flight registry; emits notification ids, ' \
                      'stores no results, runs nothing.'
   spec.homepage = 'https://github.com/seuros/coalesce_machines'
   spec.license = 'MIT'

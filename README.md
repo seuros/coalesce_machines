@@ -4,7 +4,7 @@
 
 An in-flight registry for Ruby. Before you compute something expensive, you join its key. The first caller is told to lead: go compute it. Everyone who joins while that's still running is told to follow: wait, you'll be woken. When the leader finishes, the registry hands you the list of followers to wake. It runs nothing and stores no results. It only keeps track of who's computing, who's waiting, and whom to notify.
 
-This is an initial, unstable API. It's a policy core, not a runtime: there are no threads, promises, or timeouts in here.
+Pre-1.0: breaking changes land in minor versions. It's a policy core, not a runtime: there are no threads, promises, or timeouts in here.
 
 ## Quick Start
 

@@ -87,4 +87,10 @@ module CoalesceMachines
     def flight_capacity: () -> Integer
     def waiter_capacity: () -> Integer
   end
+
+  # Private native hooks each value's `initialize` validates through; the
+  # answer is discarded, the check (raising) is the point.
+  private def self.__leader: (Integer flight) -> Integer
+  private def self.__follower: (Integer waiter, Integer flight) -> true
+  private def self.__notification: (Integer waiter, Integer flight, Integer key, Notification::outcome outcome) -> true
 end

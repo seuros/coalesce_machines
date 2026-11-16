@@ -18,8 +18,12 @@ impl Chain {
     };
 }
 
-pub fn free_slot<T>(slots: &[Option<T>]) -> Option<usize> {
-    slots.iter().position(Option::is_none)
+/// The first free slot, with its index for the chains to link.
+pub fn free_slot<T>(slots: &mut [Option<T>]) -> Option<(usize, &mut Option<T>)> {
+    slots
+        .iter_mut()
+        .enumerate()
+        .find(|(_, slot)| slot.is_none())
 }
 
 /// The chains only ever link slots that hold a waiter; the helpers below
@@ -31,6 +35,14 @@ fn update(waiters: &mut [Option<Waiter>], slot: usize, change: impl FnOnce(&mut 
     match waiters.get_mut(slot).and_then(Option::as_mut) {
         Some(waiter) => change(waiter),
         None => debug_assert!(false, "{CHAINED}"),
+    }
+}
+
+/// Free the waiter in `slot`; nothing when the slot holds none.
+pub fn clear(waiters: &mut [Option<Waiter>], slot: usize) {
+    match waiters.get_mut(slot) {
+        Some(entry @ Some(_)) => *entry = None,
+        _ => debug_assert!(false, "{CHAINED}"),
     }
 }
 
@@ -71,6 +83,7 @@ pub fn push_back(waiters: &mut [Option<Waiter>], chain: &mut Chain, slot: usize)
         None => chain.head = Some(slot),
     }
     chain.tail = Some(slot);
+    // Each linked slot is counted once, so `len` stays within the slots.
     chain.len += 1;
 }
 
@@ -80,7 +93,8 @@ pub fn pop_front(waiters: &[Option<Waiter>], chain: &mut Chain) -> Option<usize>
     if chain.head.is_none() {
         chain.tail = None;
     }
-    chain.len -= 1;
+    // A chain with a head counts at least that one; never wraps.
+    chain.len = chain.len.saturating_sub(1);
     Some(head)
 }
 
@@ -94,6 +108,7 @@ pub fn append(waiters: &mut [Option<Waiter>], chain: &mut Chain, tail: Chain) {
         None => chain.head = tail.head,
     }
     chain.tail = tail.tail;
+    // The two chains link disjoint slots, so the sum stays within the slots.
     chain.len += tail.len;
 }
 
@@ -111,7 +126,8 @@ pub fn unlink(waiters: &mut [Option<Waiter>], chain: &mut Chain, slot: usize) ->
             if chain.tail == Some(slot) {
                 chain.tail = previous;
             }
-            chain.len -= 1;
+            // `slot` is linked, so `len` counts it; never wraps.
+            chain.len = chain.len.saturating_sub(1);
             return true;
         }
         previous = cursor;

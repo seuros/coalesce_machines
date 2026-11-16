@@ -128,4 +128,4 @@ mapped to the same key share one flight. State is in memory and scoped to one
 coalescer; there is no persistence or cross-process arbitration. Lookups are
 linear scans over the fixed tables, which suits small capacities.
 
-Initial, unstable API.
+Pre-1.0: breaking changes land in minor versions.

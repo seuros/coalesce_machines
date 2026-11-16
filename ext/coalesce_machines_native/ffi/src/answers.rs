@@ -5,7 +5,7 @@
 //! defined once, at init, and pinned.
 use coalesce_machines::{Joined, Notification, Refusal};
 use magnus::{Error, RModule, RStruct, Ruby, Value, prelude::*};
-use matryona_machines::ruby::{Class, Registry, Symbols};
+use matryona_machines::ruby::{Class, Symbols};
 
 use crate::values::Outcomes;
 
@@ -16,7 +16,11 @@ pub struct Classes {
     notification: Class,
 }
 
-static CLASSES: Registry<Classes> = Registry::new("coalesce_machines");
+matryona_machines::registry! {
+    static CLASSES: Classes = "coalesce_machines";
+    /// The classes defined at init.
+    pub fn classes;
+}
 
 /// Define the three `Data` classes under `module` and pin them as defined,
 /// with no lookup back by name; Ruby adds their validating `initialize` when
@@ -34,11 +38,6 @@ pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
         notification: Class::pin(ruby, notification),
     };
     CLASSES.set(ruby, classes).map(drop)
-}
-
-/// The classes defined at init.
-pub fn classes(ruby: &Ruby) -> Result<&'static Classes, Error> {
-    CLASSES.get(ruby)
 }
 
 /// A frozen instance of `class` holding `members`, in order. Allocation and

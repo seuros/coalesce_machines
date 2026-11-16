@@ -1,5 +1,6 @@
 #![no_std]
 #![doc = include_str!("../README.md")]
+#![cfg_attr(not(test), deny(clippy::indexing_slicing))]
 
 use core::fmt;
 
@@ -8,7 +9,7 @@ use periscope_machines::{Issuer, scope_of, sequence_of};
 mod chain;
 
 use chain::{
-    Chain, append, free_slot, is_whole, next_of, pop_front, push_back, set_outcome, unlink,
+    Chain, append, clear, free_slot, is_whole, next_of, pop_front, push_back, set_outcome, unlink,
 };
 
 /// Identity of one in-flight computation, and the token that settles it.
@@ -366,11 +367,22 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
     /// [`Refusal::WaitersFull`] when the key is in flight and no waiter slot is
     /// free, [`Refusal::Exhausted`] when no id is left. Nothing changes.
     pub fn join(&mut self, key: u64) -> Result<Joined, Refusal> {
-        if let Some((home, flight)) = self.computing(key) {
-            let slot = free_slot(&self.waiters).ok_or(Refusal::WaitersFull)?;
+        let Self {
+            flights,
+            waiters,
+            ids,
+            in_flight,
+            ..
+        } = self;
+        let computing = flights.iter_mut().enumerate().find_map(|(home, entry)| {
+            let flight = entry.as_mut().filter(|flight| flight.key == key)?;
+            Some((home, flight))
+        });
+        if let Some((home, flight)) = computing {
+            let (slot, free) = free_slot(waiters).ok_or(Refusal::WaitersFull)?;
             // The last thing that can refuse, so a refused join consumes no id.
-            let id = self.ids.issue().map_err(spent)?;
-            self.waiters[slot] = Some(Waiter {
+            let id = ids.issue().map_err(spent)?;
+            *free = Some(Waiter {
                 id,
                 key,
                 flight: flight.id,
@@ -378,25 +390,21 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
                 outcome: None,
                 next: None,
             });
-            let mut followers = flight.followers;
-            push_back(&mut self.waiters, &mut followers, slot);
-            self.flights[home] = Some(Flight {
-                followers,
-                ..flight
-            });
+            push_back(waiters, &mut flight.followers, slot);
             return Ok(Joined::Follower {
                 waiter: WaiterId(id),
                 flight: FlightId(flight.id),
             });
         }
-        let slot = free_slot(&self.flights).ok_or(Refusal::FlightsFull)?;
-        let id = self.ids.issue().map_err(spent)?;
-        self.flights[slot] = Some(Flight {
+        let (_, free) = free_slot(flights).ok_or(Refusal::FlightsFull)?;
+        let id = ids.issue().map_err(spent)?;
+        *free = Some(Flight {
             id,
             key,
             followers: Chain::EMPTY,
         });
-        self.in_flight += 1;
+        // A free slot was found, so at most `FLIGHTS` are ever counted.
+        *in_flight += 1;
         Ok(Joined::Leader(FlightId(id)))
     }
 
@@ -466,7 +474,7 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
             );
             return Err(Refusal::Stale);
         }
-        self.waiters[slot] = None;
+        clear(&mut self.waiters, slot);
         Ok(())
     }
 
@@ -480,13 +488,13 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
             key,
             outcome: Some(outcome),
             ..
-        }) = self.waiters[slot]
+        }) = self.waiters.get(slot).copied().flatten()
         else {
             debug_assert!(false, "a queued slot holds a settled waiter");
             return None;
         };
         pop_front(&self.waiters, &mut self.ready);
-        self.waiters[slot] = None;
+        clear(&mut self.waiters, slot);
         Some(Notification {
             waiter: WaiterId(id),
             flight: FlightId(flight),
@@ -507,6 +515,7 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
                 break;
             };
             *entry = notification;
+            // One per entry of `out`, so it cannot pass `out.len()`.
             written += 1;
         }
         written
@@ -515,13 +524,14 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
     /// The flight currently computing `key`, if any.
     #[must_use]
     pub fn flight(&self, key: u64) -> Option<FlightId> {
-        self.computing(key).map(|(_, flight)| FlightId(flight.id))
+        self.find(|flight| flight.key == key)
+            .map(|flight| FlightId(flight.id))
     }
 
     /// Followers still waiting on `flight`, or `None` when it is not in flight.
     #[must_use]
     pub fn followers(&self, flight: FlightId) -> Option<usize> {
-        Some(self.live_flight(flight)?.1.followers.len)
+        Some(self.live_flight(flight)?.followers.len)
     }
 
     /// Flights not yet settled.
@@ -533,7 +543,13 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
     /// Followers waiting on unsettled flights, across all keys.
     #[must_use]
     pub fn waiting(&self) -> usize {
-        self.waiters.iter().flatten().count() - self.ready.len
+        // Every queued notification holds a waiter slot, so this never
+        // saturates while the ready queue is whole.
+        self.waiters
+            .iter()
+            .flatten()
+            .count()
+            .saturating_sub(self.ready.len)
     }
 
     /// Notifications queued and not yet drained.
@@ -565,13 +581,29 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
     }
 
     fn settle(&mut self, flight: FlightId, outcome: Outcome) -> Result<usize, Refusal> {
-        let (slot, settled) = self.live_flight(flight).ok_or(Refusal::Stale)?;
+        if !self.ids.owns(flight.0) {
+            return Err(Refusal::Stale);
+        }
+        let Self {
+            flights,
+            waiters,
+            ready,
+            in_flight: count,
+            ..
+        } = self;
+        let (settled, slot) = flights
+            .iter_mut()
+            .find_map(|slot| {
+                let settled = slot.filter(|live| live.id == flight.0)?;
+                Some((settled, slot))
+            })
+            .ok_or(Refusal::Stale)?;
         let followers = settled.followers;
         // Every check comes first: past this point nothing can stop half way.
         let (Some(in_flight), true, true) = (
-            self.in_flight.checked_sub(1),
-            is_whole(&self.waiters, followers),
-            is_whole(&self.waiters, self.ready),
+            count.checked_sub(1),
+            is_whole(waiters, followers),
+            is_whole(waiters, *ready),
         ) else {
             debug_assert!(
                 false,
@@ -581,33 +613,25 @@ impl<const FLIGHTS: usize, const WAITERS: usize> Coalescer<FLIGHTS, WAITERS> {
         };
         let mut cursor = followers.head;
         while let Some(index) = cursor {
-            set_outcome(&mut self.waiters, index, outcome);
-            cursor = next_of(&self.waiters, index);
+            set_outcome(waiters, index, outcome);
+            cursor = next_of(waiters, index);
         }
-        append(&mut self.waiters, &mut self.ready, followers);
+        append(waiters, ready, followers);
         // Taking the flight is last, so a refusal above leaves it in the air.
-        self.flights[slot] = None;
-        self.in_flight = in_flight;
+        *slot = None;
+        *count = in_flight;
         Ok(followers.len)
     }
 
-    /// The slot and record of the flight computing `key`, if any.
-    fn computing(&self, key: u64) -> Option<(usize, Flight)> {
-        self.find(|flight| flight.key == key)
+    /// The first live flight `wanted` picks.
+    fn find(&self, wanted: impl Fn(&Flight) -> bool) -> Option<Flight> {
+        self.flights.iter().flatten().copied().find(wanted)
     }
 
-    /// The first live flight `wanted` picks, with its slot.
-    fn find(&self, wanted: impl Fn(&Flight) -> bool) -> Option<(usize, Flight)> {
-        self.flights
-            .iter()
-            .enumerate()
-            .find_map(|(slot, entry)| entry.filter(&wanted).map(|flight| (slot, flight)))
-    }
-
-    /// The slot and record of a live flight. An id this coalescer never
+    /// The record of a live flight. An id this coalescer never
     /// issued, one from another scope included, is turned away before the
     /// table is read.
-    fn live_flight(&self, flight: FlightId) -> Option<(usize, Flight)> {
+    fn live_flight(&self, flight: FlightId) -> Option<Flight> {
         if !self.ids.owns(flight.0) {
             return None;
         }

@@ -1,6 +1,6 @@
 extern crate std;
 
-use matryona_machines::testing::{refuses, unchanged};
+use matryona_machines::testing::{describes, refuses, unchanged};
 use std::assert_matches;
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -331,15 +331,12 @@ fn key_and_id_limits() {
 
 #[test]
 fn refusals_describe_themselves() {
-    use std::string::ToString;
-    for refusal in [
-        Refusal::FlightsFull,
-        Refusal::WaitersFull,
-        Refusal::Exhausted,
-        Refusal::Stale,
-    ] {
-        assert_ne!(refusal.to_string(), "");
-    }
+    describes(&[
+        (Refusal::FlightsFull, "every flight slot is in use"),
+        (Refusal::WaitersFull, "every waiter slot is in use"),
+        (Refusal::Exhausted, "id space exhausted"),
+        (Refusal::Stale, "id does not name a live registration"),
+    ]);
 }
 
 #[test]

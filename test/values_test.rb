@@ -150,23 +150,29 @@ class ValuesTest < Minitest::Test
   # core returned, so Ruby code that raises cannot run once it has changed.
   def test_answers_are_built_without_running_ruby_code
     classes = [C::Leader, C::Follower, C::Notification]
-    classes.each do |klass|
-      klass.class_eval do
-        alias_method :__checked_initialize, :initialize
-        define_method(:initialize) { |**| raise 'ran Ruby code' }
-      end
-    end
+    originals = classes.to_h { [it, it.instance_method(:initialize)] }
+    classes.each { replace_method(it, :initialize, proc { |**| raise 'ran Ruby code' }) }
     @flights.complete(@leader.flight)
     assert_instance_of C::Leader, @flights.join(8)
     assert_instance_of C::Follower, @flights.join(8)
     assert_equal [@follower.waiter], @flights.drain(8).map(&:waiter)
     assert_equal [1, 1, 0], [@flights.in_flight, @flights.waiting, @flights.pending]
   ensure
-    classes.each do |klass|
-      klass.class_eval do
-        alias_method :initialize, :__checked_initialize
-        remove_method :__checked_initialize
-      end
-    end
+    originals&.each { |klass, method| replace_method(klass, :initialize, (method if method.owner == klass)) }
+  end
+
+  private
+
+  # Defines `name` on `klass` as `body` (removes it when `body` is nil),
+  # removing the method `klass` itself holds first. Ruby warns about the
+  # redefinition (and about removing `initialize`), deliberate here, so
+  # warnings are off for the swap alone.
+  def replace_method(klass, name, body)
+    verbose = $VERBOSE
+    $VERBOSE = nil
+    klass.remove_method(name) if klass.method_defined?(name, false) || klass.private_method_defined?(name, false)
+    klass.define_method(name, body) if body
+  ensure
+    $VERBOSE = verbose
   end
 end
